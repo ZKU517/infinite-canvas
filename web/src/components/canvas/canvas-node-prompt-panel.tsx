@@ -1,13 +1,14 @@
 import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Maximize2, Square } from "lucide-react";
+import { ArrowUp, ChevronDown, ChevronUp, LoaderCircle, Maximize2, SlidersHorizontal, Square } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
+import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
+import { CanvasGroupedModelPicker } from "./canvas-grouped-model-picker";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
@@ -47,12 +48,20 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
+    const [imageSettingsExpanded, setImageSettingsExpanded] = useState(true);
 
     // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
     useEffect(() => {
         setPrompt(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [node.id]);
+
+    // Parameters are inline now, so the old popover "open" flag used to suppress the hover toolbar must stay false.
+    useEffect(() => {
+        onImageSettingsOpenChange?.(false);
+        return () => onImageSettingsOpenChange?.(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
@@ -97,17 +106,7 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     </Tooltip>
                     <CanvasPromptLibrary onSelect={updatePrompt} />
                     {mode === "image" ? (
-                        <>
-                            <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasImageSettingsPopover
-                                config={config}
-                                placement="topLeft"
-                                buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                                onMissingConfig={() => openConfigDialog(true)}
-                                onOpenChange={onImageSettingsOpenChange}
-                            />
-                        </>
+                        <CanvasGroupedModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="min-w-0 max-w-full" />
                     ) : mode === "video" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
@@ -146,6 +145,28 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                     </span>
                 </Button>
             </div>
+            {mode === "image" ? (
+                <div className="mt-2 border-t pt-2" style={{ borderColor: theme.toolbar.border }}>
+                    <button type="button" className="flex w-full items-center justify-between gap-2 rounded-lg px-1 py-0.5 text-left" style={{ color: theme.node.muted }} onClick={() => setImageSettingsExpanded((current) => !current)} aria-expanded={imageSettingsExpanded}>
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+                            <SlidersHorizontal className="size-3.5" />
+                            {t("canvas.promptPanel.imageSettings")}
+                        </span>
+                        {imageSettingsExpanded ? <ChevronUp className="size-3.5 opacity-70" /> : <ChevronDown className="size-3.5 opacity-70" />}
+                    </button>
+                    {imageSettingsExpanded ? (
+                        <div className="mt-1.5">
+                            <ImageSettingsPanel
+                                config={config}
+                                showTitle={false}
+                                theme={theme}
+                                className="grid grid-cols-1 gap-x-5 gap-y-3.5 sm:grid-cols-2 [&>div]:min-w-0"
+                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                            />
+                        </div>
+                    ) : null}
+                </div>
+            ) : null}
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
                     <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />

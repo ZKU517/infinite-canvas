@@ -16,6 +16,7 @@ export enum CanvasNodeType {
     Video = "video",
     Audio = "audio",
     Group = "group",
+    Table = "table",
 }
 
 // Node types are open strings: built-ins use CanvasNodeType and plugins use "<pluginId>:<name>".
@@ -24,6 +25,30 @@ export type CanvasNodeTypeId = CanvasNodeType | (string & {});
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
 export type CanvasImageGenerationType = "generation" | "edit";
+
+export type CanvasNodeSplitGrid = {
+    sourceNodeId: string;
+    rows: number;
+    columns: number;
+    row: number;
+    column: number;
+};
+
+export type CanvasTableRow = {
+    id: string;
+    prompt: string;
+    imageStorageKey?: string;
+    imageUrl?: string;
+};
+
+export type CanvasTableColumn = "prompt" | "reference";
+
+export type CanvasBatchProgress = {
+    total: number;
+    done: number;
+    failed: number;
+    running: boolean;
+};
 
 export type CanvasNodeImage = {
     id: string;
@@ -84,6 +109,14 @@ export type CanvasNodeMetadata = {
     videoTaskId?: string;
     videoTaskProvider?: "openai" | "gemini";
     groupId?: string;
+    splitGrid?: CanvasNodeSplitGrid;
+    rows?: CanvasTableRow[];
+    columns?: CanvasTableColumn[];
+    batchMode?: boolean;
+    batchConcurrency?: number;
+    batchProgress?: CanvasBatchProgress;
+    tableRowIndex?: number;
+    tableRowId?: string;
     interactive?: boolean; // Plugin node interaction/move state; see CanvasNodeDefinition.interactionToggle.
 };
 

@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoTaskFailed, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { ensureImagePreview, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, imageToDataUrl, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -17,10 +17,10 @@ import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
+import { cropDataUrl, splitDataUrl, stitchGridDataUrl, upscaleDataUrl, type StitchPiece } from "@/lib/canvas/canvas-image-data";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { captureVideoFrame, type VideoFramePosition } from "@/lib/canvas/canvas-video-frame";
-import { App, Button, Modal } from "antd";
+import { App, Button, Input, Modal } from "antd";
 import { NODE_DEFAULT_SIZE, getNodeSpec } from "@/constant/canvas";
 import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
@@ -31,6 +31,7 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeAnnotateDialog } from "@/components/canvas/canvas-node-annotate-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
+import { CanvasNodeStitchDialog, buildStitchGridCells, type CanvasStitchGrid } from "@/components/canvas/canvas-node-stitch-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
@@ -50,7 +51,7 @@ import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, nodeBounds, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
     buildAngleLabel,
@@ -85,6 +86,7 @@ import {
     type CanvasNodeImage,
     type CanvasNodeText,
     type CanvasNodeMetadata,
+    type CanvasTableRow,
     type CanvasNodeTypeId,
     type ConnectionHandle,
     type ContextMenuState,
@@ -144,6 +146,41 @@ function applyGeneratedVideo(item: CanvasNodeData, video: UploadedFile, extra: C
     };
 }
 
+async function imageContentToDataUrl(content: string) {
+    if (content.startsWith("data:")) return content;
+    const blob = await fetch(content).then((response) => response.blob());
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+const TABLE_ROW_HEIGHT = 44;
+
+type TableBatchRow = { rowId: string; rowIndex: number; prompt: string; reference?: ReferenceImage };
+
+// Table nodes grow with their row count while staying inside a readable range.
+function tableNodeHeight(rowCount: number) {
+    return Math.min(600, Math.max(200, 96 + rowCount * TABLE_ROW_HEIGHT));
+}
+
+function withTableRows(node: CanvasNodeData, rows: CanvasTableRow[]): CanvasNodeData {
+    return { ...node, height: tableNodeHeight(rows.length), metadata: { ...node.metadata, rows } };
+}
+
+// Row references are stored as storage keys, so resolve a displayable URL after the project loads.
+async function hydrateTableRowImages(nodes: CanvasNodeData[]) {
+    return Promise.all(
+        nodes.map(async (node) => {
+            if (node.type !== CanvasNodeType.Table || !node.metadata?.rows?.some((row) => row.imageStorageKey)) return node;
+            const rows = await Promise.all((node.metadata.rows || []).map(async (row) => (row.imageStorageKey ? { ...row, imageUrl: await resolveImageUrl(row.imageStorageKey, row.imageUrl || "") } : row)));
+            return { ...node, metadata: { ...node.metadata, rows } };
+        }),
+    );
+}
+
 export default function CanvasPage() {
     const [mounted, setMounted] = useState(false);
 
@@ -186,6 +223,8 @@ function InfiniteCanvasPage() {
     const containerRef = useRef<HTMLDivElement>(null);
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
+    const tableImageInputRef = useRef<HTMLInputElement>(null);
+    const tableReferenceTargetRef = useRef<{ nodeId: string; rowId: string } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
     const suppressSystemPasteRef = useRef(false);
     const lastMouseRef = useRef<{ clientX: number; clientY: number } | null>(null);
@@ -264,6 +303,8 @@ function InfiniteCanvasPage() {
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
+    const [stitchNodeId, setStitchNodeId] = useState<string | null>(null);
+    const [stitchSelectionNodes, setStitchSelectionNodes] = useState<CanvasNodeData[]>([]);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [hoverPreviewNodeId, setHoverPreviewNodeId] = useState<string | null>(null);
     const [previewImageId, setPreviewImageId] = useState<string | null>(null);
@@ -275,6 +316,8 @@ function InfiniteCanvasPage() {
     const [isNodeResizing, setIsNodeResizing] = useState(false);
     const [dropTargetGroupId, setDropTargetGroupId] = useState<string | null>(null);
     const [referencePickerNodeId, setReferencePickerNodeId] = useState<string | null>(null);
+    const [importLinesNodeId, setImportLinesNodeId] = useState<string | null>(null);
+    const [importLinesText, setImportLinesText] = useState("");
 
     const nodesRef = useRef(nodes);
     const connectionsRef = useRef(connections);
@@ -451,7 +494,7 @@ function InfiniteCanvasPage() {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateCanvasImages(resetInterruptedGeneration(project.nodes));
+            const restoredNodes = await hydrateTableRowImages(await hydrateCanvasImages(resetInterruptedGeneration(project.nodes)));
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);
             setConnections(project.connections);
@@ -740,6 +783,8 @@ function InfiniteCanvasPage() {
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
+    const stitchNode = stitchNodeId ? nodeById.get(stitchNodeId) || null : null;
+    const stitchDialogNodes = useMemo(() => (stitchNode ? [stitchNode] : stitchSelectionNodes), [stitchNode, stitchSelectionNodes]);
     const contextMenuNode = contextMenu?.type === "node" ? nodeById.get(contextMenu.nodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
     const previewContent = previewImageId ? previewNode?.metadata?.images?.find((image) => image.id === previewImageId)?.content : previewNode?.metadata?.content;
@@ -747,6 +792,8 @@ function InfiniteCanvasPage() {
     const selectedNodes = useMemo(() => nodes.filter((node) => selectedNodeIds.has(node.id)), [nodes, selectedNodeIds]);
     const canGroupSelection = canGroupSelectedNodes(selectedNodeIds, nodes);
     const canUngroupSelection = canUngroupSelectedNodes(selectedNodeIds, nodes);
+    const stitchableImages = useMemo(() => selectedNodes.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content)), [selectedNodes]);
+    const canStitchSelection = stitchableImages.length >= 2 && stitchableImages.some((node) => Boolean(node.metadata?.splitGrid));
     const activeNodeId = hasMultipleSelectedNodes ? null : hoveredNodeId || (selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null);
     const groupChildCountById = useMemo(() => {
         const map = new Map<string, number>();
@@ -1766,6 +1813,78 @@ function InfiniteCanvasPage() {
         setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, title } : node)));
     }, []);
 
+    const handleTableRowsChange = useCallback((nodeId: string, rows: CanvasTableRow[]) => {
+        setNodes((prev) => prev.map((node) => (node.id === nodeId ? withTableRows(node, rows) : node)));
+    }, []);
+
+    const handleTablePickReference = useCallback((nodeId: string, rowId: string) => {
+        tableReferenceTargetRef.current = { nodeId, rowId };
+        tableImageInputRef.current?.click();
+    }, []);
+
+    const handleTableImageInputChange = useCallback(
+        async (event: ReactChangeEvent<HTMLInputElement>) => {
+            const file = event.target.files?.[0];
+            const target = tableReferenceTargetRef.current;
+            event.target.value = "";
+            tableReferenceTargetRef.current = null;
+            if (!file || !target) return;
+            try {
+                const image = await uploadImage(file);
+                setNodes((prev) =>
+                    prev.map((node) =>
+                        node.id === target.nodeId
+                            ? { ...node, metadata: { ...node.metadata, rows: node.metadata?.rows?.map((row) => (row.id === target.rowId ? { ...row, imageUrl: image.url, imageStorageKey: image.storageKey } : row)) } }
+                            : node,
+                    ),
+                );
+            } catch {
+                message.error(t("common.imageReadFailed"));
+            }
+        },
+        [message, t],
+    );
+
+    const handleTableClearReference = useCallback((nodeId: string, rowId: string) => {
+        setNodes((prev) =>
+            prev.map((node) =>
+                node.id === nodeId ? { ...node, metadata: { ...node.metadata, rows: node.metadata?.rows?.map((row) => (row.id === rowId ? { ...row, imageUrl: undefined, imageStorageKey: undefined } : row)) } } : node,
+            ),
+        );
+    }, []);
+
+    const handleTableFromImages = useCallback(
+        (nodeId: string) => {
+            const images = nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id) && node.type === CanvasNodeType.Image && Boolean(node.metadata?.content));
+            if (!images.length) {
+                message.warning(t("canvas.table.noImagesSelected"));
+                return;
+            }
+            const rows: CanvasTableRow[] = images.map((node) => ({ id: nanoid(), prompt: node.metadata?.prompt || "", imageUrl: node.metadata?.content, imageStorageKey: node.metadata?.storageKey }));
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? withTableRows(node, [...(node.metadata?.rows || []), ...rows]) : node)));
+        },
+        [message, t],
+    );
+
+    const handleTableImportLines = useCallback((nodeId: string) => {
+        setImportLinesText("");
+        setImportLinesNodeId(nodeId);
+    }, []);
+
+    const confirmTableImportLines = useCallback(() => {
+        const nodeId = importLinesNodeId;
+        const lines = importLinesText
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        if (nodeId && lines.length) {
+            setNodes((prev) => prev.map((node) => (node.id === nodeId ? withTableRows(node, [...(node.metadata?.rows || []), ...lines.map((prompt) => ({ id: nanoid(), prompt }))]) : node)));
+            message.success(t("canvas.table.imported", { count: lines.length }));
+        }
+        setImportLinesNodeId(null);
+        setImportLinesText("");
+    }, [importLinesNodeId, importLinesText, message, t]);
+
     const toggleBatchExpanded = useCallback((nodeId: string) => {
         setExpandedBatchNodeIds((current) => {
             const next = new Set(current);
@@ -1995,6 +2114,7 @@ function InfiniteCanvasPage() {
             metadata: {
                 ...imageMetadata(image),
                 prompt: node.metadata?.prompt,
+                ...(node.metadata?.splitGrid ? { splitGrid: node.metadata.splitGrid } : {}),
             },
         };
         setNodes((prev) => [...prev, child]);
@@ -2028,6 +2148,7 @@ function InfiniteCanvasPage() {
                         metadata: {
                             ...imageMetadata(image),
                             prompt: node.metadata?.prompt,
+                            splitGrid: { sourceNodeId: node.id, rows: params.rows, columns: params.columns, row: piece.row, column: piece.column },
                         },
                     } satisfies CanvasNodeData;
                 }),
@@ -2060,7 +2181,8 @@ function InfiniteCanvasPage() {
             const maskSource = { id: maskNodeId, name: "mask.png", type: maskImage.mimeType || "image/png", dataUrl: maskImage.url, storageKey: maskImage.storageKey };
             const references = [source, maskSource];
             const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, references);
-            const childMetadata = payload.generate ? { prompt, status: NODE_STATUS_LOADING, ...generationMetadata } : { prompt };
+            const splitGridMetadata = node.metadata?.splitGrid ? { splitGrid: node.metadata.splitGrid } : {};
+            const childMetadata = payload.generate ? { prompt, status: NODE_STATUS_LOADING, ...generationMetadata, ...splitGridMetadata } : { prompt, ...splitGridMetadata };
             setNodes((prev) => [
                 ...prev,
                 {
@@ -2125,7 +2247,7 @@ function InfiniteCanvasPage() {
                     position: { x: node.position.x + node.width + 96, y: node.position.y },
                     width: size.width,
                     height: size.height,
-                    metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt },
+                    metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt, ...(node.metadata?.splitGrid ? { splitGrid: node.metadata.splitGrid } : {}) },
                 };
                 setNodes((prev) => [...prev, child]);
                 setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
@@ -2157,6 +2279,7 @@ function InfiniteCanvasPage() {
             metadata: {
                 ...imageMetadata(image),
                 prompt: node.metadata?.prompt,
+                ...(node.metadata?.splitGrid ? { splitGrid: node.metadata.splitGrid } : {}),
             },
         };
         setNodes((prev) => [...prev, child]);
@@ -2164,6 +2287,51 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
     }, []);
+
+    const stitchImageNodes = useCallback(
+        async (selected: CanvasNodeData[], grid: CanvasStitchGrid) => {
+            setStitchNodeId(null);
+            setStitchSelectionNodes([]);
+            const images = selected.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content));
+            if (!images.length) {
+                message.warning(t("canvas.projectPage.stitchNoImages"));
+                return;
+            }
+            try {
+                const cells = buildStitchGridCells(images, grid);
+                const pieces: StitchPiece[] = [];
+                for (let index = 0; index < cells.length; index += 1) {
+                    const content = cells[index]?.metadata?.content;
+                    if (!content) continue;
+                    pieces.push({ dataUrl: await imageContentToDataUrl(content), row: Math.floor(index / grid.columns), column: index % grid.columns });
+                }
+                const dataUrl = await stitchGridDataUrl(pieces, grid);
+                const image = await uploadImage(dataUrl);
+                const size = fitNodeSize(image.width, image.height, 340, 340);
+                const bounds = nodeBounds(images);
+                const childId = nanoid();
+                const child: CanvasNodeData = {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.projectPage.stitchResultTitle"),
+                    position: { x: bounds.right + 96, y: (bounds.top + bounds.bottom) / 2 - size.height / 2 },
+                    width: size.width,
+                    height: size.height,
+                    metadata: { ...imageMetadata(image), prompt: cells.find((cell) => cell?.metadata?.content)?.metadata?.prompt },
+                };
+                const missing = cells.filter((cell) => !cell).length;
+                setNodes((prev) => [...prev, child]);
+                setSelectedNodeIds(new Set([childId]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(childId);
+                if (missing > 0) message.warning(t("canvas.projectPage.stitchPartial", { count: missing }));
+                message.success(t("canvas.projectPage.stitchSuccess"));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.stitchFailed"));
+            }
+        },
+        [message, t],
+    );
 
     const generateAngleNode = useCallback(
         async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
@@ -3154,6 +3322,165 @@ function InfiniteCanvasPage() {
         setContextMenu({ type: "node", x: event.clientX, y: event.clientY, nodeId });
     }, []);
 
+    const generateBatchFromTable = useCallback(
+        async (configNode: CanvasNodeData) => {
+            const nodes = nodesRef.current;
+            const connections = connectionsRef.current;
+            const upstream = connections
+                .filter((connection) => connection.toNodeId === configNode.id)
+                .map((connection) => nodes.find((node) => node.id === connection.fromNodeId))
+                .filter((node): node is CanvasNodeData => Boolean(node));
+            // Row sources: the connected table first, then multi-line text or directly connected image nodes.
+            const tableNode = upstream.find((node) => node.type === CanvasNodeType.Table);
+            const rows: TableBatchRow[] = [];
+            for (const [index, row] of (tableNode?.metadata?.rows || []).entries()) {
+                if (!row.prompt.trim()) continue;
+                let reference: ReferenceImage | undefined;
+                if (row.imageUrl || row.imageStorageKey) {
+                    try {
+                        const dataUrl = await imageToDataUrl({ url: row.imageUrl, storageKey: row.imageStorageKey });
+                        if (dataUrl) reference = { id: row.id, name: `${row.id}.png`, type: "image/png", dataUrl, storageKey: row.imageStorageKey };
+                    } catch {
+                        reference = undefined;
+                    }
+                }
+                rows.push({ rowId: row.id, rowIndex: index, prompt: row.prompt.trim(), reference });
+            }
+            if (!rows.length) {
+                const textLines = upstream
+                    .filter((node) => node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim()))
+                    .flatMap((node) =>
+                        (node.metadata?.content || "")
+                            .split(/\r?\n/)
+                            .map((line) => line.trim())
+                            .filter(Boolean),
+                    );
+                textLines.forEach((prompt, index) => rows.push({ rowId: nanoid(), rowIndex: index, prompt }));
+                if (!rows.length) {
+                    upstream
+                        .filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content))
+                        .forEach((node, index) =>
+                            rows.push({
+                                rowId: node.id,
+                                rowIndex: index,
+                                prompt: (node.metadata?.prompt || node.title || "").trim(),
+                                reference: { id: node.id, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: node.metadata?.content || "", storageKey: node.metadata?.storageKey },
+                            }),
+                        );
+                }
+            }
+            if (!rows.length) {
+                message.warning(t("canvas.configNode.batchEmpty"));
+                return;
+            }
+
+            const generationConfig = { ...buildGenerationConfig(effectiveConfig, configNode, "image"), count: "1" };
+            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                openConfigDialog(true);
+                return;
+            }
+
+            // Lay out placeholder cards in a 3-column grid to the right of the config node.
+            const imageConfig = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+            const columns = 3;
+            const gap = 22;
+            const startX = configNode.position.x + configNode.width + 96;
+            const gridRows = Math.ceil(rows.length / columns);
+            const startY = configNode.position.y + configNode.height / 2 - (gridRows * imageConfig.height + (gridRows - 1) * gap) / 2;
+            const cellAt = (index: number) => ({ x: startX + (index % columns) * (imageConfig.width + gap), y: startY + Math.floor(index / columns) * (imageConfig.height + gap) });
+            const resultNodes: CanvasNodeData[] = rows.map((row, index) => {
+                const referenceImages = row.reference ? [row.reference] : [];
+                return {
+                    id: nanoid(),
+                    type: CanvasNodeType.Image,
+                    title: row.prompt.slice(0, 32) || tableNode?.title || t("canvas.nodeTypes.image"),
+                    position: cellAt(index),
+                    width: imageConfig.width,
+                    height: imageConfig.height,
+                    metadata: {
+                        prompt: row.prompt,
+                        status: NODE_STATUS_LOADING,
+                        ...buildImageGenerationMetadata(referenceImages.length ? "edit" : "generation", generationConfig, 1, referenceImages),
+                        tableRowIndex: row.rowIndex,
+                        tableRowId: row.rowId,
+                    },
+                };
+            });
+            const resultById = new Map(resultNodes.map((node) => [node.id, node]));
+            const resultIds = new Set(resultById.keys());
+            const concurrency = Math.min(4, Math.max(1, configNode.metadata?.batchConcurrency || 2));
+            const controller = startGenerationRequest(configNode.id, configNode.id, configNode.id);
+            setRunningNodeId(configNode.id);
+            setNodes((prev) => [...prev, ...resultNodes]);
+            setConnections((prev) => [...prev, ...resultNodes.map((node) => ({ id: nanoid(), fromNodeId: configNode.id, toNodeId: node.id }))]);
+            let done = 0;
+            let failed = 0;
+            const writeProgress = (running: boolean) =>
+                setNodes((prev) => prev.map((node) => (node.id === configNode.id ? { ...node, metadata: { ...node.metadata, batchProgress: { total: rows.length, done, failed, running } } } : node)));
+            writeProgress(true);
+            const items = rows.map((row, index) => ({ ...row, batchIndex: index, node: resultNodes[index] }));
+            const queue = [...items];
+
+            const runRow = async () => {
+                while (queue.length && !controller.signal.aborted) {
+                    const item = queue.shift();
+                    if (!item) break;
+                    const cell = cellAt(item.batchIndex);
+                    try {
+                        const image = item.reference
+                            ? await requestEdit(generationConfig, item.prompt, [item.reference], { signal: controller.signal }).then((items) => items[0])
+                            : await requestGeneration(generationConfig, item.prompt, { signal: controller.signal }).then((items) => items[0]);
+                        const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
+                        const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
+                        const next: CanvasNodeData = {
+                            ...item.node,
+                            position: { x: cell.x + (imageConfig.width - size.width) / 2, y: cell.y + (imageConfig.height - size.height) / 2 },
+                            ...size,
+                            metadata: { ...item.node.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, errorDetails: undefined },
+                        };
+                        resultById.set(item.node.id, next);
+                        setNodes((prev) => prev.map((node) => (node.id === item.node.id ? next : node)));
+                        done += 1;
+                    } catch (error) {
+                        if (isGenerationCanceled(error)) break;
+                        failed += 1;
+                        const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                        setNodes((prev) => prev.map((node) => (node.id === item.node.id ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails } } : node)));
+                        resultById.set(item.node.id, { ...item.node, metadata: { ...item.node.metadata, status: NODE_STATUS_ERROR, errorDetails } });
+                    }
+                    writeProgress(true);
+                }
+            };
+
+            try {
+                await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, () => runRow()));
+                if (controller.signal.aborted) {
+                    // Stopped rows stay visible as canceled instead of loading forever.
+                    failed = Math.max(failed, rows.length - done);
+                    setNodes((prev) => prev.map((node) => (resultIds.has(node.id) && node.metadata?.status === NODE_STATUS_LOADING ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, errorDetails: t("common.requestCanceled") } } : node)));
+                }
+                const finished = resultNodes.map((node) => resultById.get(node.id) || node);
+                const rect = getGroupWrapRect(finished);
+                const created = createCanvasNode(CanvasNodeType.Group, { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 });
+                const groupNode: CanvasNodeData = { ...created, position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height };
+                setNodes((prev) => {
+                    const withGroup = prev.map((node) => (resultIds.has(node.id) ? { ...node, metadata: { ...node.metadata, groupId: groupNode.id } } : node));
+                    const insertAt = withGroup.findIndex((node) => resultIds.has(node.id));
+                    return insertAt < 0 ? [...withGroup, groupNode] : [...withGroup.slice(0, insertAt), groupNode, ...withGroup.slice(insertAt)];
+                });
+                if (!controller.signal.aborted) {
+                    if (failed) message.error(t("canvas.configNode.batchPartial", { failed }));
+                    else message.success(t("canvas.configNode.batchDone"));
+                }
+            } finally {
+                finishGenerationRequest(configNode.id, controller);
+                setRunningNodeId((current) => (current === configNode.id ? null : current));
+                writeProgress(false);
+            }
+        },
+        [effectiveConfig, finishGenerationRequest, isAiConfigReady, isGenerationCanceled, message, openConfigDialog, requestEdit, requestGeneration, startGenerationRequest, t],
+    );
+
     const renderNodePanel = useCallback(
         (panelNode: CanvasNodeData) =>
             getNodeDefinition(panelNode.type)?.Panel ? (
@@ -3204,11 +3531,16 @@ function InfiniteCanvasPage() {
                 onStop={confirmStopGeneration}
                 onGenerate={(nodeId) => {
                     const target = nodesRef.current.find((item) => item.id === nodeId);
-                    void handleGenerateNode(nodeId, target?.metadata?.generationMode || "image", target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
+                    const mode = target?.metadata?.generationMode || "image";
+                    if (target?.metadata?.batchMode && mode === "image") {
+                        void generateBatchFromTable(target);
+                        return;
+                    }
+                    void handleGenerateNode(nodeId, mode, target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
                 }}
             />
         ),
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, runningNodeId],
+        [configInputsById, confirmStopGeneration, generateBatchFromTable, handleConfigNodeChange, handleGenerateNode, runningNodeId],
     );
 
     const hoverPreviewNode = hoverPreviewNodeId ? nodeById.get(hoverPreviewNodeId) || null : null;
@@ -3337,6 +3669,11 @@ function InfiniteCanvasPage() {
                             onResizeEnd={handleNodeResizeEnd}
                             onContentChange={handleNodeContentChange}
                             onTitleChange={handleNodeTitleChange}
+                            onTableRowsChange={handleTableRowsChange}
+                            onTablePickReference={handleTablePickReference}
+                            onTableClearReference={handleTableClearReference}
+                            onTableImportLines={handleTableImportLines}
+                            onTableFromImages={handleTableFromImages}
                             onToggleBatch={toggleBatchExpanded}
                             onSetBatchPrimary={setBatchPrimary}
                             onDuplicateBatchImage={duplicateBatchImage}
@@ -3418,6 +3755,15 @@ function InfiniteCanvasPage() {
                     onAnnotate={(node) => setAnnotateNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
+                    onStitch={(node) => {
+                        // Hover tool on one grid slice stitches the whole sibling grid, not just that slice.
+                        const splitGrid = node.metadata?.splitGrid;
+                        const siblings = splitGrid
+                            ? nodesRef.current.filter((item) => item.type === CanvasNodeType.Image && Boolean(item.metadata?.content) && item.metadata?.splitGrid?.sourceNodeId === splitGrid.sourceNodeId)
+                            : [];
+                        setStitchNodeId(null);
+                        setStitchSelectionNodes(siblings.length ? siblings : [node]);
+                    }}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
                     onSuperResolve={(node) => setSuperResolveNodeId(node.id)}
                     onAngle={(node) => setAngleNodeId(node.id)}
@@ -3436,8 +3782,10 @@ function InfiniteCanvasPage() {
                         showToolbar={!isNodeDragging && !isNodeResizing}
                         canGroup={canGroupSelection}
                         canUngroup={canUngroupSelection}
+                        canStitch={canStitchSelection}
                         onGroup={groupSelection}
                         onUngroup={ungroupSelection}
+                        onStitch={() => setStitchSelectionNodes(stitchableImages)}
                     />
                 ) : null}
 
@@ -3454,6 +3802,7 @@ function InfiniteCanvasPage() {
                     onAddAudio={() => createNode(CanvasNodeType.Audio)}
                     onAddText={() => createNode(CanvasNodeType.Text)}
                     onAddConfig={() => createNode(CanvasNodeType.Config)}
+                    onAddTable={() => createNode(CanvasNodeType.Table)}
                     onAddGroup={() => createNode(CanvasNodeType.Group)}
                     onAddExtensionNode={(type) => createNode(type)}
                     onUndo={undoCanvas}
@@ -3500,6 +3849,11 @@ function InfiniteCanvasPage() {
                 ) : null}
 
                 <input ref={imageInputRef} type="file" multiple accept="image/*,video/*,audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" className="hidden" onChange={handleImageInputChange} />
+                <input ref={tableImageInputRef} type="file" accept="image/*" className="hidden" onChange={handleTableImageInputChange} />
+
+                <Modal title={t("canvas.table.importLines")} open={Boolean(importLinesNodeId)} destroyOnHidden okText={t("common.confirm")} cancelText={t("common.cancel")} onOk={confirmTableImportLines} onCancel={() => setImportLinesNodeId(null)}>
+                    <Input.TextArea rows={6} value={importLinesText} placeholder={t("canvas.table.rowPlaceholder")} onChange={(event) => setImportLinesText(event.target.value)} />
+                </Modal>
 
                 <CanvasNodeInfoModal node={infoNode} open={Boolean(infoNode)} onClose={() => setInfoNodeId(null)} />
                 <CanvasPluginManagerModal open={pluginManagerOpen} onClose={() => setPluginManagerOpen(false)} />
@@ -3515,6 +3869,16 @@ function InfiniteCanvasPage() {
                 ) : null}
 
                 {splitNode?.metadata?.content ? <CanvasNodeSplitDialog dataUrl={splitNode.metadata.content} open={Boolean(splitNode)} onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode!, params)} /> : null}
+
+                <CanvasNodeStitchDialog
+                    nodes={stitchDialogNodes}
+                    open={Boolean(stitchNode || stitchSelectionNodes.length)}
+                    onClose={() => {
+                        setStitchNodeId(null);
+                        setStitchSelectionNodes([]);
+                    }}
+                    onConfirm={(grid) => void stitchImageNodes(stitchDialogNodes, grid)}
+                />
 
                 {upscaleNode?.metadata?.content ? (
                     <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open={Boolean(upscaleNode)} onClose={() => setUpscaleNodeId(null)} onConfirm={(params) => void upscaleImageNode(upscaleNode!, params)} />

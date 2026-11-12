@@ -1,12 +1,12 @@
 import type { CSSProperties } from "react";
-import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
-import { Button, Segmented } from "antd";
+import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Table2, Video } from "lucide-react";
+import { Button, InputNumber, Segmented, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { ModelPicker } from "@/components/model-picker";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
+import { CanvasGroupedModelPicker } from "./canvas-grouped-model-picker";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
@@ -34,6 +34,11 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
+    // Batch generation produces images per table row; text/video/audio nodes keep their normal flow.
+    const batchVisible = mode === "image";
+    const batchMode = Boolean(node.metadata?.batchMode);
+    const batchConcurrency = node.metadata?.batchConcurrency || 2;
+    const batchProgress = node.metadata?.batchProgress;
 
     return (
         <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
@@ -99,7 +104,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             </div>
 
             <div className="mb-2 grid min-w-0 cursor-default grid-cols-[minmax(0,1fr)_148px] items-center gap-2" onMouseDown={(event) => event.stopPropagation()}>
-                <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
+                <CanvasGroupedModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => openConfigDialog(true)} fullWidth />
                 {mode === "video" ? (
                     <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                 ) : mode === "image" ? (
@@ -111,11 +116,41 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                 )}
             </div>
 
+            {batchVisible ? (
+                <div className="mb-1.5 flex min-w-0 cursor-default items-center gap-2 rounded-lg border px-2 py-1" style={{ borderColor: theme.node.stroke }} onMouseDown={(event) => event.stopPropagation()}>
+                    <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-medium">
+                        <Table2 className="size-3.5" style={{ color: theme.node.muted }} />
+                        {t("canvas.configNode.batch")}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[10px]" style={{ color: theme.node.muted }} title={t("canvas.configNode.batchTitle")}>
+                        {batchProgress
+                            ? `${t("canvas.configNode.batchProgress", { done: batchProgress.done, total: batchProgress.total })} · ${
+                                  batchProgress.running ? t("canvas.configNode.batchRunning") : batchProgress.failed > 0 ? t("canvas.configNode.batchPartial", { failed: batchProgress.failed }) : t("canvas.configNode.batchDone")
+                              }`
+                            : t("canvas.configNode.batchTitle")}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1 text-[10px]" style={{ color: theme.node.muted }}>
+                        {t("canvas.configNode.batchConcurrency")}
+                        <InputNumber
+                            size="small"
+                            className="w-14"
+                            min={1}
+                            max={4}
+                            value={batchConcurrency}
+                            disabled={!batchMode}
+                            onMouseDown={(event) => event.stopPropagation()}
+                            onChange={(value) => onConfigChange(node.id, { batchConcurrency: Math.min(4, Math.max(1, Number(value) || 2)) })}
+                        />
+                        <Switch size="small" checked={batchMode} onChange={(value) => onConfigChange(node.id, { batchMode: value })} />
+                    </span>
+                </div>
+            ) : null}
+
             <Button
                 type="primary"
                 className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
                 danger={isRunning}
-                disabled={!isRunning && !canGenerate}
+                disabled={!isRunning && !canGenerate && !batchMode}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={() => (isRunning ? onStop(node.id) : onGenerate(node.id))}
             >
@@ -124,7 +159,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         <>
                             <LoaderCircle className="size-4 animate-spin" />
                             <Square className="size-3.5 fill-current" />
-                            <span>{t("canvas.configNode.stop")}</span>
+                            <span>{batchMode ? t("canvas.configNode.batchStop") : t("canvas.configNode.stop")}</span>
                         </>
                     ) : (
                         <>

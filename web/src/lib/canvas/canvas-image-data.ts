@@ -1,3 +1,5 @@
+import i18n from "@/i18n";
+
 export type ImageCropRect = {
     x: number;
     y: number;
@@ -34,6 +36,15 @@ export type ImageSplitPiece = {
     dataUrl: string;
 };
 
+export const MAX_STITCH_SIZE = 32767;
+export const MAX_STITCH_PIXELS = 268000000;
+
+export type StitchPiece = {
+    dataUrl: string;
+    row: number;
+    column: number;
+};
+
 export async function cropDataUrl(dataUrl: string, crop?: ImageCropRect) {
     const image = await loadImage(dataUrl);
     if (crop) {
@@ -62,6 +73,48 @@ export async function splitDataUrl(dataUrl: string, params: ImageSplitParams): P
     }
 
     return pieces;
+}
+
+export async function stitchGridDataUrl(pieces: StitchPiece[], grid: { rows: number; columns: number }): Promise<string> {
+    const rows = Math.max(1, Math.floor(grid.rows));
+    const columns = Math.max(1, Math.floor(grid.columns));
+    const cells = new Map<string, HTMLImageElement>();
+    await Promise.all(
+        pieces.map(async (piece) => {
+            if (piece.row < 0 || piece.row >= rows || piece.column < 0 || piece.column >= columns) return;
+            cells.set(`${piece.row}-${piece.column}`, await loadImage(piece.dataUrl));
+        }),
+    );
+
+    const columnWidths = Array.from({ length: columns }, () => 0);
+    const rowHeights = Array.from({ length: rows }, () => 0);
+    cells.forEach((image, key) => {
+        const [row, column] = key.split("-").map(Number);
+        columnWidths[column] = Math.max(columnWidths[column], image.width);
+        rowHeights[row] = Math.max(rowHeights[row], image.height);
+    });
+    const width = columnWidths.reduce((total, value) => total + value, 0);
+    const height = rowHeights.reduce((total, value) => total + value, 0);
+    if (width > MAX_STITCH_SIZE || height > MAX_STITCH_SIZE || width * height > MAX_STITCH_PIXELS) throw new Error(i18n.t("canvas.editors.stitchTooLarge"));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, width);
+    canvas.height = Math.max(1, height);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error(i18n.t("canvas.projectPage.stitchFailed"));
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    let y = 0;
+    for (let row = 0; row < rows; row += 1) {
+        let x = 0;
+        for (let column = 0; column < columns; column += 1) {
+            const image = cells.get(`${row}-${column}`);
+            if (image) context.drawImage(image, x, y, image.width, image.height);
+            x += columnWidths[column];
+        }
+        y += rowHeights[row];
+    }
+    return canvas.toDataURL("image/png");
 }
 
 function buildSplitCuts(lines: number[] | undefined, size: number, count: number) {

@@ -1,10 +1,10 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Pencil, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Combine, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Pencil, Scissors, Sparkles, Upload, ZoomIn } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "annotate" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
+export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "annotate" | "crop" | "split" | "stitch" | "upscale" | "superResolve" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
 
 export type ImageToolHandlers = {
@@ -14,6 +14,7 @@ export type ImageToolHandlers = {
     onAnnotate: (node: CanvasNodeData) => void;
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
+    onStitch: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
     onSuperResolve: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
@@ -29,6 +30,7 @@ export type ImageToolDefinition = {
     title: string | ((node: CanvasNodeData) => string);
     icon: (node: CanvasNodeData) => ReactNode;
     active?: (node: CanvasNodeData) => boolean;
+    available?: (node: CanvasNodeData) => boolean;
     run: (node: CanvasNodeData, handlers: ImageToolHandlers) => void;
 };
 
@@ -37,7 +39,7 @@ export type ImageQuickToolsConfig = {
     showLabels: boolean;
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v8";
+export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v9";
 
 const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
 
@@ -108,6 +110,15 @@ export const imageToolDefinitions: ImageToolDefinition[] = [
         run: (node, handlers) => handlers.onSplit(node),
     },
     {
+        id: "stitch",
+        defaultVisible: true,
+        label: () => i18n.t("canvas.imageTools.stitch"),
+        title: () => i18n.t("canvas.imageTools.stitchTitle"),
+        icon: () => <Combine className="size-4" />,
+        available: (node) => Boolean(node.metadata?.splitGrid),
+        run: (node, handlers) => handlers.onStitch(node),
+    },
+    {
         id: "upscale",
         defaultVisible: true,
         label: () => i18n.t("canvas.imageTools.upscale"),
@@ -150,6 +161,7 @@ export function buildImageToolbarTools(node: CanvasNodeData, handlers: ImageTool
         title: resolveToolText(tool.title, node),
         icon: tool.icon(node),
         active: tool.active?.(node),
+        available: tool.available?.(node) ?? true,
         onClick: () => tool.run(node, handlers),
     }));
 }

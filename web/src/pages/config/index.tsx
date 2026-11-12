@@ -1,9 +1,12 @@
 import { useTranslation } from "react-i18next";
 
 import { AppConfigPanel } from "@/components/layout/app-config-modal";
+import { BackupSettingsPanel } from "@/components/layout/backup-settings-panel";
+import { useAuthStore } from "@/stores/use-auth-store";
 
 export default function ConfigPage() {
     const { t } = useTranslation();
+    const user = useAuthStore((state) => state.user);
 
     return (
         <main className="h-full overflow-y-auto bg-background">
@@ -13,6 +16,7 @@ export default function ConfigPage() {
                     <p className="mt-1 text-sm text-stone-500">{t("config.description")}</p>
                 </div>
                 <AppConfigPanel />
+                {user?.admin ? <BackupSettingsPanel /> : null}
             </div>
         </main>
     );

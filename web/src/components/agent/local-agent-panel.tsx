@@ -591,13 +591,13 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
     useEffect(() => {
         if (!connected) return;
         void fetchAgentJson<AgentModelsResponse>(endpoint, token, "/agent/codex/models").then(({ data = [] }) => {
-            const names = new Set<string>();
+            const seen = new Set<string>();
             const models = data.flatMap((item) => {
-                const name = item.displayName || item.model;
-                const efforts = item.supportedReasoningEfforts.filter(({ reasoningEffort }) => AGENT_REASONING_EFFORTS.has(reasoningEffort));
-                if (item.model === "codex-auto-review" || names.has(name) || !efforts.length) return [];
-                names.add(name);
-                const defaultReasoningEffort = efforts.some((effort) => effort.reasoningEffort === item.defaultReasoningEffort) ? item.defaultReasoningEffort : efforts[0].reasoningEffort;
+                if (!item?.model || item.model === "codex-auto-review" || seen.has(item.model)) return [];
+                seen.add(item.model);
+                // 不认识的思考强度直接忽略；模型本身即使没有任何强度也要保留，只是界面上隐藏强度选择器。
+                const efforts = (item.supportedReasoningEfforts || []).filter(({ reasoningEffort }) => AGENT_REASONING_EFFORTS.has(reasoningEffort));
+                const defaultReasoningEffort = efforts.some((effort) => effort.reasoningEffort === item.defaultReasoningEffort) ? item.defaultReasoningEffort : efforts[0]?.reasoningEffort || "";
                 return [{ ...item, supportedReasoningEfforts: efforts, defaultReasoningEffort }];
             });
             if (!models.length) return;
@@ -605,9 +605,10 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
             const current = models.find((item) => item.model === savedModel) || models.find((item) => item.isDefault) || models[0];
             const savedEffort = useAgentStore.getState().reasoningEffort;
             const efforts = current.supportedReasoningEfforts.map((item) => item.reasoningEffort);
-            const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? savedEffort as AgentReasoningEffort : current.defaultReasoningEffort || efforts[0];
+            const nextEffort = efforts.includes(savedEffort as AgentReasoningEffort) ? (savedEffort as AgentReasoningEffort) : current.defaultReasoningEffort || efforts[0] || "";
             localStorage.setItem("canvas-agent-model", current.model);
-            localStorage.setItem("canvas-agent-reasoning-effort", nextEffort);
+            if (nextEffort) localStorage.setItem("canvas-agent-reasoning-effort", nextEffort);
+            else localStorage.removeItem("canvas-agent-reasoning-effort");
             setAgentState({ models, model: current.model, reasoningEffort: nextEffort });
         }).catch((error) => addEventLog(rt("modelListFailed"), error));
     }, [connected, endpoint, setAgentState, token]);
@@ -1426,10 +1427,11 @@ export function LocalAgentPanel({ embedded, headless, autoConnect }: { embedded?
                         onModelChange={(model) => {
                             const selected = models.find((item) => item.model === model);
                             if (!selected) return;
-                            const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort;
+                            const effort = selected.defaultReasoningEffort || selected.supportedReasoningEfforts[0]?.reasoningEffort || "";
                             localStorage.setItem("canvas-agent-model", model);
                             if (effort) localStorage.setItem("canvas-agent-reasoning-effort", effort);
-                            setAgentState({ model, ...(effort ? { reasoningEffort: effort } : {}) });
+                            else localStorage.removeItem("canvas-agent-reasoning-effort");
+                            setAgentState({ model, reasoningEffort: effort });
                         }}
                         onReasoningEffortChange={(reasoningEffort) => {
                             localStorage.setItem("canvas-agent-reasoning-effort", reasoningEffort);

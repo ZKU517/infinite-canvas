@@ -28,6 +28,7 @@ import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-pa
 import { CanvasNodeContextMenu } from "@/components/canvas/canvas-context-menu";
 import { CanvasNodeAngleDialog, type CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
+import { CanvasNodeAnnotateDialog } from "@/components/canvas/canvas-node-annotate-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
@@ -186,6 +187,8 @@ function InfiniteCanvasPage() {
     const imageInputRef = useRef<HTMLInputElement>(null);
     const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
     const clipboardRef = useRef<CanvasClipboard | null>(null);
+    const suppressSystemPasteRef = useRef(false);
+    const lastMouseRef = useRef<{ clientX: number; clientY: number } | null>(null);
     const historyRef = useRef<{ past: CanvasHistoryEntry[]; future: CanvasHistoryEntry[] }>({ past: [], future: [] });
     const lastHistoryRef = useRef<CanvasHistoryEntry | null>(null);
     const historyCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -256,6 +259,7 @@ function InfiniteCanvasPage() {
     const [pluginManagerOpen, setPluginManagerOpen] = useState(false);
     const [cropNodeId, setCropNodeId] = useState<string | null>(null);
     const [maskEditNodeId, setMaskEditNodeId] = useState<string | null>(null);
+    const [annotateNodeId, setAnnotateNodeId] = useState<string | null>(null);
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [superResolveNodeId, setSuperResolveNodeId] = useState<string | null>(null);
@@ -731,6 +735,7 @@ function InfiniteCanvasPage() {
     const infoNode = infoNodeId ? nodeById.get(infoNodeId) || null : null;
     const cropNode = cropNodeId ? nodeById.get(cropNodeId) || null : null;
     const maskEditNode = maskEditNodeId ? nodeById.get(maskEditNodeId) || null : null;
+    const annotateNode = annotateNodeId ? nodeById.get(annotateNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
     const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
@@ -1541,12 +1546,12 @@ function InfiniteCanvasPage() {
     }, []);
 
     const createTextNodeFromClipboard = useCallback(
-        (text: string) => {
+        (text: string, position?: Position) => {
             const trimmed = text.trim();
             if (!trimmed) return false;
 
             const node = {
-                ...createCanvasNode(CanvasNodeType.Text, getCanvasCenter(), { content: trimmed, status: NODE_STATUS_SUCCESS }),
+                ...createCanvasNode(CanvasNodeType.Text, position || getCanvasCenter(), { content: trimmed, status: NODE_STATUS_SUCCESS }),
                 title: trimmed.slice(0, 32) || t("canvas.projectPage.clipboardText"),
             };
 
@@ -1560,24 +1565,61 @@ function InfiniteCanvasPage() {
         [getCanvasCenter, t],
     );
 
-    const pasteSystemClipboard = useCallback(async () => {
-        if (!navigator.clipboard) return;
+    const pasteSystemClipboard = useCallback(
+        async (event: ClipboardEvent) => {
+            const data = event.clipboardData;
+            if (!data) return;
 
-        const items = await navigator.clipboard.read();
-        const imageItem = items.find((item) => item.types.some((type) => type.startsWith("image/")));
-        if (imageItem) {
-            const imageType = imageItem.types.find((type) => type.startsWith("image/"));
-            if (!imageType) return;
-            const blob = await imageItem.getType(imageType);
-            const file = new File([blob], "clipboard-image.png", { type: imageType });
-            void createImageFileNode(file, getCanvasCenter());
-            message.success(t("canvas.projectPage.clipboardImageAdded"));
-            return;
-        }
+            const position = lastMouseRef.current ? screenToCanvas(lastMouseRef.current.clientX, lastMouseRef.current.clientY) : getCanvasCenter();
 
-        const text = await navigator.clipboard.readText();
-        if (createTextNodeFromClipboard(text)) message.success(t("canvas.projectPage.clipboardTextAdded"));
-    }, [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, message, t]);
+            const imageItem = Array.from(data.items || []).find((item) => item.kind === "file" && item.type.startsWith("image/"));
+            if (imageItem) {
+                const file = imageItem.getAsFile();
+                if (file) {
+                    event.preventDefault();
+                    void createImageFileNode(file, position);
+                    message.success(t("canvas.projectPage.clipboardImageAdded"));
+                    return;
+                }
+            }
+
+            const text = data.getData("text/plain");
+            if (text && createTextNodeFromClipboard(text, position)) {
+                event.preventDefault();
+                message.success(t("canvas.projectPage.clipboardTextAdded"));
+            }
+        },
+        [createImageFileNode, createTextNodeFromClipboard, getCanvasCenter, screenToCanvas, message, t],
+    );
+
+    useEffect(() => {
+        const trackMouse = (event: MouseEvent) => {
+            lastMouseRef.current = { clientX: event.clientX, clientY: event.clientY };
+        };
+        window.addEventListener("mousemove", trackMouse);
+        return () => window.removeEventListener("mousemove", trackMouse);
+    }, []);
+
+    useEffect(() => {
+        const handlePaste = (event: ClipboardEvent) => {
+            const target = event.target instanceof Element ? event.target : null;
+            if (
+                event.target instanceof HTMLInputElement ||
+                event.target instanceof HTMLTextAreaElement ||
+                event.target instanceof HTMLSelectElement ||
+                target?.closest("[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-shortcuts-ignore]")
+            ) {
+                return;
+            }
+            if (suppressSystemPasteRef.current) {
+                suppressSystemPasteRef.current = false;
+                return;
+            }
+            void pasteSystemClipboard(event);
+        };
+        window.addEventListener("paste", handlePaste);
+        return () => window.removeEventListener("paste", handlePaste);
+    }, [pasteSystemClipboard]);
 
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
@@ -1633,8 +1675,17 @@ function InfiniteCanvasPage() {
             }
 
             if (isModifierShortcut && !event.altKey && key === "v") {
-                event.preventDefault();
-                if (!pasteCopiedNodes()) void pasteSystemClipboard();
+                // 只有画布内部剪贴板真的有内容时才拦截 Ctrl/Cmd+V；
+                // 否则交给浏览器默认粘贴，让 paste 事件把系统剪贴板里的图片/文字贴进画布。
+                if (pasteCopiedNodes()) {
+                    event.preventDefault();
+                    // preventDefault 生效后浏览器不会再派发 paste 事件，标记需要自动过期，
+                    // 否则会残留 true 把下一次系统粘贴静默吞掉。
+                    suppressSystemPasteRef.current = true;
+                    window.setTimeout(() => {
+                        suppressSystemPasteRef.current = false;
+                    }, 300);
+                }
                 return;
             }
 
@@ -2058,6 +2109,35 @@ function InfiniteCanvasPage() {
             }
         },
         [effectiveConfig, finishGenerationRequest, isAiConfigReady, message, openConfigDialog, startGenerationRequest, t],
+    );
+
+    const annotateImageNode = useCallback(
+        async (node: CanvasNodeData, dataUrl: string) => {
+            setAnnotateNodeId(null);
+            try {
+                const image = await uploadImage(dataUrl);
+                const size = fitNodeSize(image.width, image.height, node.width, node.height);
+                const childId = nanoid();
+                const child: CanvasNodeData = {
+                    id: childId,
+                    type: CanvasNodeType.Image,
+                    title: t("canvas.projectPage.annotateResult"),
+                    position: { x: node.position.x + node.width + 96, y: node.position.y },
+                    width: size.width,
+                    height: size.height,
+                    metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt },
+                };
+                setNodes((prev) => [...prev, child]);
+                setConnections((prev) => [...prev, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+                setSelectedNodeIds(new Set([childId]));
+                setSelectedConnectionId(null);
+                setDialogNodeId(childId);
+                message.success(t("canvas.projectPage.annotateSuccess"));
+            } catch (error) {
+                message.error(error instanceof Error ? error.message : t("canvas.projectPage.generationFailed"));
+            }
+        },
+        [message, t],
     );
 
     const upscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
@@ -3179,6 +3259,7 @@ function InfiniteCanvasPage() {
                     agentOpen={agentPanelOpen}
                     compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
                     onToggleAgent={toggleAgentPanel}
+                    logNodes={nodes}
                 />
 
                 <InfiniteCanvas
@@ -3334,6 +3415,7 @@ function InfiniteCanvasPage() {
                     onDownload={downloadNodeImage}
                     onSaveAsset={(node) => void saveNodeAsset(node)}
                     onMaskEdit={(node) => setMaskEditNodeId(node.id)}
+                    onAnnotate={(node) => setAnnotateNodeId(node.id)}
                     onCrop={(node) => setCropNodeId(node.id)}
                     onSplit={(node) => setSplitNodeId(node.id)}
                     onUpscale={(node) => setUpscaleNodeId(node.id)}
@@ -3426,6 +3508,10 @@ function InfiniteCanvasPage() {
 
                 {maskEditNode?.metadata?.content ? (
                     <CanvasNodeMaskEditDialog dataUrl={maskEditNode.metadata.content} open={Boolean(maskEditNode)} onClose={() => setMaskEditNodeId(null)} onConfirm={(payload) => void maskEditImageNode(maskEditNode!, payload)} />
+                ) : null}
+
+                {annotateNode?.metadata?.content ? (
+                    <CanvasNodeAnnotateDialog dataUrl={annotateNode.metadata.content} open={Boolean(annotateNode)} onClose={() => setAnnotateNodeId(null)} onConfirm={(dataUrl) => void annotateImageNode(annotateNode!, dataUrl)} />
                 ) : null}
 
                 {splitNode?.metadata?.content ? <CanvasNodeSplitDialog dataUrl={splitNode.metadata.content} open={Boolean(splitNode)} onClose={() => setSplitNodeId(null)} onConfirm={(params) => void splitImageNode(splitNode!, params)} /> : null}

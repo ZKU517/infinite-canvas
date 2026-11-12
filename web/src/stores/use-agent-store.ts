@@ -18,7 +18,8 @@ export type AgentModel = {
     id: string;
     model: string;
     displayName: string;
-    defaultReasoningEffort: AgentReasoningEffort;
+    /** 该模型默认的思考强度；没有可用强度时为空字符串。 */
+    defaultReasoningEffort?: AgentReasoningEffort | "";
     supportedReasoningEfforts: Array<{ reasoningEffort: AgentReasoningEffort; description?: string }>;
     isDefault?: boolean;
 };

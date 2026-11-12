@@ -1,9 +1,10 @@
 import { useMemo } from "react";
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { localForageStorage } from "@/lib/localforage-storage";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -141,6 +142,8 @@ type ConfigStore = {
     isConfigOpen: boolean;
     configTab: ConfigTabKey;
     shouldPromptContinue: boolean;
+    /** 用户手动关闭配置弹窗的时间戳；用于抑制生成/Agent 反复触发的自动弹窗。 */
+    configPromptDismissedAt: number;
     updateConfig: <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
     importChannelCredentials: (input: { baseUrl?: string | null; apiKey?: string | null }) => ChannelCredentialsImportResult;
     updateWebdavConfig: <K extends keyof WebdavSyncConfig>(key: K, value: WebdavSyncConfig[K]) => void;
@@ -149,6 +152,9 @@ type ConfigStore = {
     setConfigDialogOpen: (isOpen: boolean) => void;
     clearPromptContinue: () => void;
 };
+
+/** 自动弹窗冷却时间：期间内不再因为生成/Agent 重试而重复弹出配置弹窗。 */
+const CONFIG_PROMPT_COOLDOWN_MS = 5 * 60 * 1000;
 
 const VIDEO_KEYWORDS = ["video", "sora", "veo", "kling", "wan", "hailuo"];
 
@@ -220,6 +226,7 @@ export const useConfigStore = create<ConfigStore>()(
             isConfigOpen: false,
             configTab: "channels",
             shouldPromptContinue: false,
+            configPromptDismissedAt: 0,
             updateConfig: (key, value) =>
                 set((state) => ({
                     config: {
@@ -241,12 +248,18 @@ export const useConfigStore = create<ConfigStore>()(
                     },
                 })),
             isAiConfigReady: (config, model) => isAiConfigReady(config, model),
-            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") => set({ isConfigOpen: true, shouldPromptContinue, configTab }),
-            setConfigDialogOpen: (isConfigOpen) => set({ isConfigOpen }),
+            openConfigDialog: (shouldPromptContinue = false, configTab = "channels") =>
+                set((state) => {
+                    // 自动弹出（生成失败 / Agent 反复重试触发）时：已经打开、或用户刚手动关掉，都不再重复弹。
+                    if (shouldPromptContinue && (state.isConfigOpen || Date.now() - state.configPromptDismissedAt < CONFIG_PROMPT_COOLDOWN_MS)) return {};
+                    return { isConfigOpen: true, shouldPromptContinue, configTab };
+                }),
+            setConfigDialogOpen: (isConfigOpen) => set((state) => ({ isConfigOpen, ...(isConfigOpen ? {} : { configPromptDismissedAt: Date.now() }) })),
             clearPromptContinue: () => set({ shouldPromptContinue: false }),
         }),
         {
             name: CONFIG_STORE_KEY,
+            storage: createJSONStorage(() => localForageStorage),
             partialize: (state) => ({ config: state.config, webdav: state.webdav }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;

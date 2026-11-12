@@ -42,6 +42,10 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
 }
 
+function isServerImageUrl(url: string) {
+    return url.startsWith("/api/blob/") || /^https?:\/\//i.test(url);
+}
+
 export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
     return Promise.all(
         nodes.map(async (node) => {
@@ -53,12 +57,14 @@ export async function hydrateCanvasImages(nodes: CanvasNodeData[]) {
                 (metadata.images || []).map(async (image) => {
                     if (!image.content) return image;
                     void ensureImagePreview(image.storageKey);
+                    if (isServerImageUrl(image.content)) return image;
                     return { ...image, content: await resolveImageUrl(image.storageKey, image.content) };
                 }),
             );
             if (metadata.storageKey) {
                 void ensureImagePreview(metadata.storageKey);
-                return { ...node, metadata: { ...metadata, content: await resolveImageUrl(metadata.storageKey, content), images } };
+                const resolvedContent = isServerImageUrl(content) ? content : await resolveImageUrl(metadata.storageKey, content);
+                return { ...node, metadata: { ...metadata, content: resolvedContent, images } };
             }
             if (!content.startsWith("data:image/")) return node;
             return { ...node, metadata: { ...metadata, ...imageMetadata(await uploadImage(content)) } };

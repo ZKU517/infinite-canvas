@@ -1,7 +1,6 @@
-import localforage from "localforage";
-
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
+import { createRemoteStore } from "@/lib/remote-storage";
 import { withLocalProxy } from "@/stores/use-config-store";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
 
@@ -14,23 +13,20 @@ export type UploadedImage = {
     mimeType: string;
 };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
-const previewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_previews" });
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const store = createRemoteStore("image_files", "blob");
+const previewStore = createRemoteStore("image_previews", "blob");
+const imageLogStore = createRemoteStore("image_generation_logs", "json");
+const videoLogStore = createRemoteStore("video_generation_logs", "json");
 const objectUrls = new Map<string, string>();
 const previewUrls = new Map<string, string>();
 const previewListeners = new Set<() => void>();
 let previewRevision = 0;
 let previewQueue: Promise<unknown> = Promise.resolve();
-const IMAGE_PREVIEW_VERSION = 1;
 const IMAGE_DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 const IMAGE_REMOTE_LOAD_TIMEOUT_MS = 10 * 60_000;
 const IMAGE_DECODE_TIMEOUT_MS = 10_000;
 const IMAGE_RESPONSE_ERROR = "ImageResponseError";
 const IMAGE_TIMEOUT_ERROR = "ImageTimeoutError";
-
-type StoredImagePreview = { version: number; blob?: Blob };
 
 type ImageReadOptions = { signal?: AbortSignal };
 
@@ -176,8 +172,8 @@ export async function ensureImagePreview(storageKey?: string) {
     if (!storageKey) return undefined;
     const cached = previewUrls.get(storageKey);
     if (cached) return cached;
-    const stored = await previewStore.getItem<StoredImagePreview>(storageKey).catch(() => null);
-    if (stored?.version === IMAGE_PREVIEW_VERSION) return stored.blob ? cacheImagePreview(storageKey, stored.blob) : undefined;
+    const stored = await previewStore.getItem<Blob>(storageKey).catch(() => null);
+    if (stored) return cacheImagePreview(storageKey, stored);
     queueImagePreview(storageKey);
     return undefined;
 }
@@ -194,7 +190,7 @@ function queueImagePreview(storageKey: string) {
 
 async function storeImagePreview(storageKey: string, original: Blob) {
     const preview = await createImageThumbnail(original).catch(() => undefined);
-    await previewStore.setItem<StoredImagePreview>(storageKey, { version: IMAGE_PREVIEW_VERSION, blob: preview }).catch(() => undefined);
+    if (preview) await previewStore.setItem(storageKey, preview).catch(() => undefined);
     return preview ? cacheImagePreview(storageKey, preview) : undefined;
 }
 

@@ -1,6 +1,5 @@
-import localforage from "localforage";
-
 import { runPromptSource, type RawPrompt } from "./prompt-source-runtime";
+import { createRemoteStore } from "@/lib/remote-storage";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import i18n from "@/i18n";
 import type { PromptSource } from "./prompt-source-presets";
@@ -46,7 +45,7 @@ type SourceCache = PromptSourceStatus & {
 };
 
 const cacheTtlMs = 1000 * 60 * 60;
-const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
+const promptCacheStore = createRemoteStore("prompt_cache", "json");
 const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
 
 function enabledSources() {

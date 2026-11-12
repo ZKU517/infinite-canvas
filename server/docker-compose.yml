@@ -1,0 +1,21 @@
+services:
+  infinite-canvas:
+    image: node:24-alpine
+    container_name: infinite-canvas-server
+    restart: unless-stopped
+    ports:
+      - "3081:3081"
+    environment:
+      PORT: 3081
+      DATA_DIR: /data
+      STATIC_DIR: /srv/dist
+      ALLOW_REGISTRATION: "true"
+      TZ: Asia/Shanghai
+    volumes:
+      # 服务端代码（只读）
+      - ./server.js:/srv/server.js:ro
+      # 前端构建产物：先在 web/ 下执行 npm run build
+      - ../web/dist:/srv/dist:ro
+      # 数据目录（账号 / 画布 / 素材 / 快照）
+      - ./data:/data
+    command: ["node", "/srv/server.js"]

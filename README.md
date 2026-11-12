@@ -154,6 +154,19 @@ docker compose up -d
 
 如果默认的OpenAI接口调用方式与您的API不同，可自定义生图/视频脚本调用。
 
+### 自建服务端（可选）
+
+默认数据保存在浏览器本地。若需要**多用户账号 + 服务器集中存储**（换设备接力编辑、服务端快照备份），
+可使用仓库内 `server/` 的 Node 服务端（无第三方依赖）：
+
+```bash
+cd web && npm ci && npm run build && cd ..
+docker compose -f server/docker-compose.yml up -d
+```
+
+运行后访问 `http://localhost:3081`，第一个注册的账号自动成为管理员。
+详见 [server/README.md](server/README.md)。
+
 ## 效果展示
 
 <table width="100%">

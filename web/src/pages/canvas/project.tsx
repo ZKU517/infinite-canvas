@@ -907,7 +907,7 @@ function InfiniteCanvasPage() {
                   ? Boolean(definition.autoOpenPanel)
                   : definition?.useBuiltinPanel
                     ? true
-                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group;
+                    : isBuiltinType(type) && type !== CanvasNodeType.Text && type !== CanvasNodeType.Audio && type !== CanvasNodeType.Group && type !== CanvasNodeType.Table;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
         [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
@@ -1059,7 +1059,7 @@ function InfiniteCanvasPage() {
         setConnections((prev) => [...prev, ...referenceConnections]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
-        if (next.type !== CanvasNodeType.Group) setDialogNodeId(id);
+        if (next.type !== CanvasNodeType.Group && next.type !== CanvasNodeType.Table) setDialogNodeId(id);
     }, []);
 
     const copySelectedNodes = useCallback(() => {
@@ -1138,7 +1138,7 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds(new Set(pastedNodes.map((node) => node.id)));
         setSelectedConnectionId(null);
         setContextMenu(null);
-        setDialogNodeId(pastedNodes[0]?.type === CanvasNodeType.Group ? null : pastedNodes[0]?.id || null);
+        setDialogNodeId(pastedNodes[0]?.type === CanvasNodeType.Group || pastedNodes[0]?.type === CanvasNodeType.Table ? null : pastedNodes[0]?.id || null);
         return true;
     }, [getCanvasCenter]);
 
@@ -1401,7 +1401,7 @@ function InfiniteCanvasPage() {
             if (clickedDefinition?.hidePanel) {
                 // Clicking a display-only plugin node selects it without opening a lower panel.
                 setDialogNodeId((current) => (current === clickedNodeId ? current : null));
-            } else if (clickedNode?.type !== CanvasNodeType.Group) {
+            } else if (clickedNode?.type !== CanvasNodeType.Group && clickedNode?.type !== CanvasNodeType.Table) {
                 setDialogNodeId(clickedNodeId);
                 if (useConfigStore.getState().config.autoFocusOnSelect) {
                     // Wait for the generation panel to render so centering accounts for it.

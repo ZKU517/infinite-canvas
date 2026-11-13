@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowUp, Layers, LoaderCircle, Maximize2, Square } from "lucide-react";
+import { ArrowUp, Layers, LoaderCircle, Maximize2, Square, Table2 } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -36,6 +36,8 @@ type CanvasNodePromptPanelProps = {
     onStartReferenceSelection?: (nodeId: string) => void;
     onImageSettingsOpenChange?: (open: boolean) => void;
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
+    /** Rows of a table wired into this node; image nodes then batch one image per row. */
+    tableRowCount?: number;
 };
 
 export function CanvasNodePromptPanel({
@@ -52,6 +54,7 @@ export function CanvasNodePromptPanel({
     onStartReferenceSelection,
     onImageSettingsOpenChange,
     modeOverride,
+    tableRowCount = 0,
 }: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
@@ -83,7 +86,7 @@ export function CanvasNodePromptPanel({
 
     const submit = () => {
         const text = prompt.trim();
-        if (!text || isRunning) return;
+        if ((!text && !tableRowCount) || isRunning) return;
         onGenerate(node.id, mode, text);
     };
 
@@ -111,6 +114,12 @@ export function CanvasNodePromptPanel({
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
             />
 
+            {mode === "image" && tableRowCount > 0 ? (
+                <div className="mt-1.5 flex min-w-0 items-center gap-1 px-1 text-[11px]" style={{ color: theme.node.muted }}>
+                    <Table2 className="size-3.5 shrink-0" />
+                    <span className="truncate">{t("canvas.promptPanel.tableBatchHint", { count: tableRowCount })}</span>
+                </div>
+            ) : null}
             <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
@@ -164,7 +173,7 @@ export function CanvasNodePromptPanel({
                         type="primary"
                         className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
                         danger={isRunning}
-                        disabled={!isRunning && !prompt.trim()}
+                        disabled={!isRunning && !prompt.trim() && !tableRowCount}
                         onClick={() => (isRunning ? onStop(node.id) : submit())}
                         aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
                     >

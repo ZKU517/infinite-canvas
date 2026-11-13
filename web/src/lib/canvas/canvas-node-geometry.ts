@@ -149,7 +149,14 @@ export function normalizeConnection(firstNodeId: string, secondNodeId: string, n
     if (table && config) return { fromNodeId: table.id, toNodeId: config.id };
     if (table) {
         const other = first.id === table.id ? second : first;
-        if (other.type === CanvasNodeType.Group || other.type === CanvasNodeType.Image || other.type === CanvasNodeType.Text) return { fromNodeId: other.id, toNodeId: table.id };
+        if (first.id === table.id) {
+            // Table output: an empty image node becomes the per-row generation target.
+            if (other.type === CanvasNodeType.Image && !other.metadata?.content) return { fromNodeId: table.id, toNodeId: other.id };
+            return null;
+        }
+        // Wired into the table as a connection-driven input row.
+        if (other.type === CanvasNodeType.Image || other.type === CanvasNodeType.Text || other.type === CanvasNodeType.Group) return { fromNodeId: other.id, toNodeId: table.id };
+        return null;
     }
     if (second.type === CanvasNodeType.Group) return null;
     if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;

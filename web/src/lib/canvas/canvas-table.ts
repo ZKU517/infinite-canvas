@@ -120,3 +120,34 @@ export function tableBatchRows(tableNode: CanvasNodeData | null, nodes: CanvasNo
 export function tableRowCountForConfig(configNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     return tableBatchRows(findConfigTable(configNodeId, nodes, connections), nodes, connections).length;
 }
+
+/** A table wired into an image node drives row-by-row generation into that node. */
+export function findTableOutputTarget(imageNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    for (const connection of connections) {
+        if (connection.toNodeId !== imageNodeId) continue;
+        const source = byId.get(connection.fromNodeId);
+        if (source?.type === CanvasNodeType.Table) return source;
+    }
+    return null;
+}
+
+/**
+ * Earlier builds reversed "table output -> image node" drags into "image -> table input".
+ * Empty image nodes cannot be real table inputs, so restore the intended direction on load.
+ */
+export function migrateTableOutputConnections(nodes: CanvasNodeData[], connections: CanvasConnection[]) {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    let changed = false;
+    const next = connections.map((connection) => {
+        const from = byId.get(connection.fromNodeId);
+        const to = byId.get(connection.toNodeId);
+        if (!from || !to) return connection;
+        if (from.type === CanvasNodeType.Image && !from.metadata?.content && to.type === CanvasNodeType.Table) {
+            changed = true;
+            return { ...connection, fromNodeId: to.id, toNodeId: from.id };
+        }
+        return connection;
+    });
+    return { changed, connections: changed ? next : connections };
+}

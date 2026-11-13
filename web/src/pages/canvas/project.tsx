@@ -52,7 +52,7 @@ import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNod
 import { findConfigTable, findTableOutputTarget, migrateTableOutputConnections, syncAllTableInputs, tableBatchRows, tableRowCountForConfig } from "@/lib/canvas/canvas-table";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
-import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, nodeBounds, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
+import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, fitGroupsToMembers, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, nodeBounds, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
     buildAngleLabel,
@@ -246,6 +246,9 @@ function InfiniteCanvasPage() {
         // Keyed by node id so drag frames look positions up in O(1) instead of scanning the array per node.
         initialSelectedNodes: Map<string, { x: number; y: number }>;
         movedIds: Set<string>;
+        // Alt+drag duplicates the selection on the first movement; originals stay put.
+        altDuplicate: boolean;
+        altDuplicated: boolean;
     }>({
         isDraggingNode: false,
         hasMoved: false,
@@ -253,6 +256,8 @@ function InfiniteCanvasPage() {
         startY: 0,
         initialSelectedNodes: new Map(),
         movedIds: new Set(),
+        altDuplicate: false,
+        altDuplicated: false,
     });
 
     const config = useConfigStore((state) => state.config);
@@ -938,12 +943,19 @@ function InfiniteCanvasPage() {
             if (!ids.size) return;
             const allIds = new Set(ids);
             setNodes((prev) => {
-                const next = prev.filter((node) => !allIds.has(node.id));
-                return next.map((node) => {
-                    const groupId = node.metadata?.groupId;
-                    if (groupId && allIds.has(groupId)) return { ...node, metadata: { ...node.metadata, groupId: undefined } };
-                    return node;
+                const affectedGroups = new Set<string>();
+                prev.forEach((node) => {
+                    if (allIds.has(node.id) && node.metadata?.groupId && !allIds.has(node.metadata.groupId)) affectedGroups.add(node.metadata.groupId);
                 });
+                const next = prev.filter((node) => !allIds.has(node.id));
+                return fitGroupsToMembers(
+                    next.map((node) => {
+                        const groupId = node.metadata?.groupId;
+                        if (groupId && allIds.has(groupId)) return { ...node, metadata: { ...node.metadata, groupId: undefined } };
+                        return node;
+                    }),
+                    affectedGroups,
+                );
             });
             setConnections((prev) => prev.filter((conn) => !allIds.has(conn.fromNodeId) && !allIds.has(conn.toNodeId)));
             setSelectedNodeIds(new Set());
@@ -1075,11 +1087,56 @@ function InfiniteCanvasPage() {
         };
         const referenceConnections = connectionsRef.current.filter((connection) => connection.toNodeId === nodeId).map((connection) => ({ ...connection, id: nanoid(), toNodeId: id }));
 
-        setNodes((prev) => [...prev, next]);
+        setNodes((prev) => {
+            const appended = [...prev, next];
+            const groupId = next.metadata?.groupId;
+            return groupId ? fitGroupsToMembers(appended, [groupId]) : appended;
+        });
         setConnections((prev) => [...prev, ...referenceConnections]);
         setSelectedNodeIds(new Set([id]));
         setSelectedConnectionId(null);
         if (next.type !== CanvasNodeType.Group && next.type !== CanvasNodeType.Table) setDialogNodeId(id);
+    }, []);
+
+    // Alt+drag: clone the dragged selection in place; the first drag frame then moves the copies.
+    const duplicateNodesForDrag = useCallback((sourceIds: Set<string>) => {
+        const sources = nodesRef.current.filter((node) => sourceIds.has(node.id));
+        if (!sources.length) return null;
+        const idMap = new Map<string, string>();
+        sources.forEach((node, index) => idMap.set(node.id, `${node.type}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`));
+        const copies = sources.map((node) => ({
+            ...node,
+            id: idMap.get(node.id) as string,
+            position: { ...node.position },
+            metadata: node.metadata ? { ...node.metadata } : undefined,
+        }));
+        // Remap group membership when the group itself is copied; otherwise the copy starts ungrouped
+        // and can be dropped into/out of groups like any other dragged node.
+        copies.forEach((copy) => {
+            const groupId = copy.metadata?.groupId;
+            if (!groupId) return;
+            copy.metadata = { ...copy.metadata, groupId: idMap.get(groupId) };
+        });
+        const internalConnections = connectionsRef.current
+            .filter((connection) => idMap.has(connection.fromNodeId) && idMap.has(connection.toNodeId))
+            .map((connection) => ({
+                ...connection,
+                id: nanoid(),
+                fromNodeId: idMap.get(connection.fromNodeId) as string,
+                toNodeId: idMap.get(connection.toNodeId) as string,
+            }));
+        setNodes((prev) => {
+            const next = [...prev, ...copies];
+            const copiedGroupIds = copies.filter((node) => node.type === CanvasNodeType.Group).map((node) => node.id);
+            return copiedGroupIds.length ? fitGroupsToMembers(next, copiedGroupIds) : next;
+        });
+        if (internalConnections.length) setConnections((prev) => [...prev, ...internalConnections]);
+        setSelectedNodeIds(new Set(copies.map((node) => node.id)));
+        setSelectedConnectionId(null);
+        return {
+            ids: new Set(copies.map((node) => node.id)),
+            positions: new Map(copies.map((node) => [node.id, { x: node.position.x, y: node.position.y }])),
+        };
     }, []);
 
     const copySelectedNodes = useCallback(() => {
@@ -1340,6 +1397,11 @@ function InfiniteCanvasPage() {
             setContextMenu(null);
             setHoveredNodeId(null);
             setSelectedConnectionId(null);
+            // Alt+drag on an already selected node keeps the whole selection for duplication.
+            if (event.altKey && selectedNodeIdsRef.current.has(nodeId)) {
+                pendingSelectionRef.current = new Set(selectedNodeIdsRef.current);
+                return;
+            }
             const { nextSelected } = selectNodeByEvent(event, nodeId);
             pendingSelectionRef.current = nextSelected;
         },
@@ -1369,6 +1431,8 @@ function InfiniteCanvasPage() {
             startY: event.clientY,
             initialSelectedNodes,
             movedIds: new Set(initialSelectedNodes.keys()),
+            altDuplicate: event.altKey,
+            altDuplicated: false,
         };
         historyPausedRef.current = true;
         nodeDraggingRef.current = true;
@@ -1400,14 +1464,28 @@ function InfiniteCanvasPage() {
                     const initial = initialPositions.get(node.id);
                     return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                 });
-                const targetGroup = findGroupDropTarget(movedIds, moved);
-                if (targetGroup) return snapNodesIntoGroup(movedIds, moved, targetGroup);
-                return moved.map((node) => {
-                    if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
-                    const groupId = findContainingGroupId(node, moved);
-                    if (node.metadata?.groupId === groupId) return node;
-                    return { ...node, metadata: { ...node.metadata, groupId } };
+                // Groups the dragged nodes leave (or enter) need their edges re-fitted after the drop.
+                const affectedGroups = new Set<string>();
+                prev.forEach((node) => {
+                    if (movedIds.has(node.id) && node.metadata?.groupId) affectedGroups.add(node.metadata.groupId);
                 });
+                const targetGroup = findGroupDropTarget(movedIds, moved);
+                let next: CanvasNodeData[];
+                if (targetGroup) {
+                    affectedGroups.add(targetGroup.id);
+                    next = snapNodesIntoGroup(movedIds, moved, targetGroup);
+                } else {
+                    next = moved.map((node) => {
+                        if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
+                        const groupId = findContainingGroupId(node, moved);
+                        if (node.metadata?.groupId === groupId) return node;
+                        return { ...node, metadata: { ...node.metadata, groupId } };
+                    });
+                }
+                next.forEach((node) => {
+                    if (movedIds.has(node.id) && node.metadata?.groupId) affectedGroups.add(node.metadata.groupId);
+                });
+                return fitGroupsToMembers(next, affectedGroups);
             });
         }
 
@@ -1415,6 +1493,8 @@ function InfiniteCanvasPage() {
         dragRef.current.hasMoved = false;
         dragRef.current.initialSelectedNodes = new Map();
         dragRef.current.movedIds = new Set();
+        dragRef.current.altDuplicate = false;
+        dragRef.current.altDuplicated = false;
         if (wasClick && clickedNodeId) {
             const clickedNode = nodesRef.current.find((node) => node.id === clickedNodeId);
             const clickedDefinition = clickedNode ? getNodeDefinition(clickedNode.type) : undefined;
@@ -1436,13 +1516,22 @@ function InfiniteCanvasPage() {
             const currentViewport = viewportRef.current;
 
             if (dragRef.current.isDraggingNode) {
+                if (Math.abs(event.clientX - dragRef.current.startX) > 3 || Math.abs(event.clientY - dragRef.current.startY) > 3) {
+                    dragRef.current.hasMoved = true;
+                }
+                // Alt+drag: clone the selection once the pointer actually moves, then keep dragging the copies.
+                if (dragRef.current.altDuplicate && dragRef.current.hasMoved && !dragRef.current.altDuplicated) {
+                    const duplicated = duplicateNodesForDrag(dragRef.current.movedIds);
+                    if (duplicated) {
+                        dragRef.current.initialSelectedNodes = duplicated.positions;
+                        dragRef.current.movedIds = duplicated.ids;
+                        dragRef.current.altDuplicated = true;
+                    }
+                }
                 const dx = (event.clientX - dragRef.current.startX) / currentViewport.k;
                 const dy = (event.clientY - dragRef.current.startY) / currentViewport.k;
                 const initialPositions = dragRef.current.initialSelectedNodes;
                 const movedIds = dragRef.current.movedIds;
-                if (Math.abs(event.clientX - dragRef.current.startX) > 3 || Math.abs(event.clientY - dragRef.current.startY) > 3) {
-                    dragRef.current.hasMoved = true;
-                }
 
                 // Drop-target detection and node updates both run once per frame; mousemove can fire far more often than the display refreshes.
                 if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -1452,12 +1541,20 @@ function InfiniteCanvasPage() {
                         return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
                     });
                     setDropTargetGroupId(findGroupDropTarget(movedIds, previewNodes)?.id || null);
-                    setNodes((prev) =>
-                        prev.map((node) => {
+                    setNodes((prev) => {
+                        const moved = prev.map((node) => {
                             const initial = initialPositions.get(node.id);
                             return initial ? { ...node, position: { x: initial.x + dx, y: initial.y + dy } } : node;
-                        }),
-                    );
+                        });
+                        // The group being left keeps its bounds during the drag (so the node can leave it);
+                        // only a different group being entered expands live to preview the incoming member.
+                        const currentGroupIds = new Set<string>();
+                        moved.forEach((node) => {
+                            if (movedIds.has(node.id) && node.metadata?.groupId) currentGroupIds.add(node.metadata.groupId);
+                        });
+                        const target = findGroupDropTarget(movedIds, moved);
+                        return target && !currentGroupIds.has(target.id) ? fitGroupsToMembers(moved, [target.id]) : moved;
+                    });
                     rafRef.current = null;
                 });
                 return;
@@ -1470,7 +1567,7 @@ function InfiniteCanvasPage() {
                 setMouseWorld(screenToCanvas(event.clientX, event.clientY));
             }
         },
-        [finishNodeDrag, getConnectionDropTarget, screenToCanvas],
+        [duplicateNodesForDrag, finishNodeDrag, getConnectionDropTarget, screenToCanvas],
     );
 
     const handleGlobalPointerMove = useCallback(
@@ -1798,7 +1895,11 @@ function InfiniteCanvasPage() {
     );
 
     const handleNodeResize = useCallback((nodeId: string, width: number, height: number, position?: Position) => {
-        setNodes((prev) => prev.map((node) => (node.id === nodeId ? { ...node, width, height, position: position || node.position } : node)));
+        setNodes((prev) => {
+            const resized = prev.map((node) => (node.id === nodeId ? { ...node, width, height, position: position || node.position } : node));
+            const groupId = prev.find((node) => node.id === nodeId)?.metadata?.groupId;
+            return groupId ? fitGroupsToMembers(resized, [groupId]) : resized;
+        });
     }, []);
 
     const handleNodeResizeStart = useCallback(() => {

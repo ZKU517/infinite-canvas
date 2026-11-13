@@ -70,6 +70,37 @@ export function getGroupWrapRect(members: CanvasNodeData[]) {
     };
 }
 
+/**
+ * Re-fits a group to its current members (same padding as group creation).
+ * Returns null when the group has no members or already matches.
+ */
+export function fitGroupBounds(group: CanvasNodeData, nodes: CanvasNodeData[]) {
+    if (group.type !== CanvasNodeType.Group) return null;
+    const members = nodes.filter((node) => node.id !== group.id && node.metadata?.groupId === group.id);
+    if (!members.length) return null;
+    const rect = getGroupWrapRect(members);
+    if (Math.abs(group.position.x - rect.x) < 0.5 && Math.abs(group.position.y - rect.y) < 0.5 && Math.abs(group.width - rect.width) < 0.5 && Math.abs(group.height - rect.height) < 0.5) return null;
+    return { ...group, position: { x: rect.x, y: rect.y }, width: rect.width, height: rect.height };
+}
+
+/**
+ * Keeps group edges tight around their children. Passing groupIds limits the work to groups touched by
+ * the current interaction; without it every group is checked.
+ */
+export function fitGroupsToMembers(nodes: CanvasNodeData[], groupIds?: Iterable<string>) {
+    const ids = groupIds ? new Set(groupIds) : null;
+    let changed = false;
+    const next = nodes.map((node) => {
+        if (node.type !== CanvasNodeType.Group) return node;
+        if (ids && !ids.has(node.id)) return node;
+        const fitted = fitGroupBounds(node, nodes);
+        if (!fitted) return node;
+        changed = true;
+        return fitted;
+    });
+    return changed ? next : nodes;
+}
+
 export function canGroupSelectedNodes(selectedIds: Set<string>, nodes: CanvasNodeData[]) {
     const members = collectGroupMemberNodes(selectedIds, nodes);
     if (members.length < 2) return false;

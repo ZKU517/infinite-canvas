@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { ArrowUp, LoaderCircle, Maximize2, Minus, Plus, Square } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { ArrowUp, Layers, LoaderCircle, Maximize2, Square } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -156,7 +157,7 @@ export function CanvasNodePromptPanel({
                                 onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                                 onOpenChange={onImageSettingsOpenChange}
                             />
-                            <CountStepper count={imageCount} theme={theme} onChange={(count) => onConfigChange(node.id, { count })} />
+                            <CanvasCountPopover count={imageCount} theme={theme} onChange={(count) => onConfigChange(node.id, { count })} />
                         </>
                     ) : null}
                     <Button
@@ -247,37 +248,102 @@ function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
     return { audioInstructions: value };
 }
 
-function CountStepper({ count, theme, onChange }: { count: number; theme: CanvasTheme; onChange: (count: number) => void }) {
+const COUNT_OPTIONS = Array.from({ length: 10 }, (_, index) => index + 1);
+
+/** Compact "×N" trigger with a 5-column number grid popover, matching the reference generation card. */
+function CanvasCountPopover({ count, theme, onChange }: { count: number; theme: CanvasTheme; onChange: (count: number) => void }) {
     const { t } = useTranslation();
-    const setCount = (next: number) => onChange(Math.max(1, Math.min(15, next)));
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    const panelRef = useRef<HTMLDivElement>(null);
+    const [open, setOpen] = useState(false);
+    const [anchor, setAnchor] = useState<DOMRect | null>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const syncPosition = () => setAnchor(triggerRef.current?.getBoundingClientRect() || null);
+        const closeOnOutsidePointer = (event: PointerEvent) => {
+            const target = event.target;
+            if (!(target instanceof Node)) return;
+            if (triggerRef.current?.contains(target) || panelRef.current?.contains(target)) return;
+            setOpen(false);
+        };
+        syncPosition();
+        window.addEventListener("resize", syncPosition);
+        window.addEventListener("scroll", syncPosition, true);
+        window.addEventListener("pointerdown", closeOnOutsidePointer, true);
+        return () => {
+            window.removeEventListener("resize", syncPosition);
+            window.removeEventListener("scroll", syncPosition, true);
+            window.removeEventListener("pointerdown", closeOnOutsidePointer, true);
+        };
+    }, [open]);
+
+    const choose = (next: number) => {
+        onChange(Math.max(1, Math.min(COUNT_OPTIONS.length, next)));
+        setOpen(false);
+    };
+
     return (
-        <span
-            className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-full border px-1"
-            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
-            onMouseDown={(event) => event.stopPropagation()}
-            onPointerDown={(event) => event.stopPropagation()}
-        >
-            <Button
-                size="small"
-                type="text"
-                className="!h-6 !w-6 !min-w-6 !rounded-full !p-0 disabled:opacity-40"
-                style={{ color: theme.node.text }}
-                icon={<Minus className="size-3" />}
-                disabled={count <= 1}
-                onClick={() => setCount(count - 1)}
-                aria-label={t("canvas.promptPanel.decreaseCount")}
-            />
-            <span className="min-w-6 text-center text-xs font-medium tabular-nums">{t("canvas.promptPanel.countShort", { count })}</span>
-            <Button
-                size="small"
-                type="text"
-                className="!h-6 !w-6 !min-w-6 !rounded-full !p-0 disabled:opacity-40"
-                style={{ color: theme.node.text }}
-                icon={<Plus className="size-3" />}
-                disabled={count >= 15}
-                onClick={() => setCount(count + 1)}
-                aria-label={t("canvas.promptPanel.increaseCount")}
-            />
-        </span>
+        <>
+            <button
+                ref={triggerRef}
+                type="button"
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full border px-2.5 text-xs transition hover:opacity-80"
+                style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => setOpen((current) => !current)}
+                aria-label={t("settingsPanels.image.count")}
+                aria-expanded={open}
+            >
+                <Layers className="size-3.5 opacity-80" />
+                <span className="tabular-nums">{t("canvas.promptPanel.countShort", { count })}</span>
+            </button>
+            {open && anchor
+                ? createPortal(
+                      <div
+                          ref={panelRef}
+                          data-canvas-no-zoom
+                          className="canvas-count-popover rounded-xl border p-2 shadow-2xl"
+                          style={{
+                              position: "fixed",
+                              zIndex: 1200,
+                              width: 200,
+                              left: Math.max(12, Math.min(window.innerWidth - 200 - 12, anchor.left)),
+                              bottom: window.innerHeight - anchor.top + 8,
+                              background: theme.toolbar.panel,
+                              borderColor: theme.toolbar.border,
+                          }}
+                          onMouseDown={(event) => event.stopPropagation()}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => event.stopPropagation()}
+                      >
+                          <div className="grid grid-cols-5 gap-1.5">
+                              {COUNT_OPTIONS.map((option) => {
+                                  const active = option === count;
+                                  return (
+                                      <button
+                                          key={option}
+                                          type="button"
+                                          className="grid size-8 cursor-pointer place-items-center rounded-md text-xs font-medium tabular-nums transition"
+                                          style={active ? { background: theme.node.text, color: theme.node.panel } : { color: theme.node.text }}
+                                          onMouseEnter={(event) => {
+                                              if (!active) event.currentTarget.style.background = theme.node.fill;
+                                          }}
+                                          onMouseLeave={(event) => {
+                                              if (!active) event.currentTarget.style.background = "transparent";
+                                          }}
+                                          onClick={() => choose(option)}
+                                      >
+                                          {option}
+                                      </button>
+                                  );
+                              })}
+                          </div>
+                      </div>,
+                      document.body,
+                  )
+                : null}
+        </>
     );
 }

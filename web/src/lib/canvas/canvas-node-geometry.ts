@@ -142,6 +142,15 @@ export function normalizeConnection(firstNodeId: string, secondNodeId: string, n
     const first = nodes.find((node) => node.id === firstNodeId);
     const second = nodes.find((node) => node.id === secondNodeId);
     if (!first || !second || first.id === second.id) return null;
+    // Tables are a data source for generation configs and a sink for media/text inputs.
+    // Normalize both drag directions so the stored edge always matches the data flow.
+    const table = first.type === CanvasNodeType.Table ? first : second.type === CanvasNodeType.Table ? second : null;
+    const config = first.type === CanvasNodeType.Config ? first : second.type === CanvasNodeType.Config ? second : null;
+    if (table && config) return { fromNodeId: table.id, toNodeId: config.id };
+    if (table) {
+        const other = first.id === table.id ? second : first;
+        if (other.type === CanvasNodeType.Group || other.type === CanvasNodeType.Image || other.type === CanvasNodeType.Text) return { fromNodeId: other.id, toNodeId: table.id };
+    }
     if (second.type === CanvasNodeType.Group) return null;
     if (first.type === CanvasNodeType.Config && second.type === CanvasNodeType.Config) return null;
     if (second.type === CanvasNodeType.Config) return { fromNodeId: first.id, toNodeId: second.id };

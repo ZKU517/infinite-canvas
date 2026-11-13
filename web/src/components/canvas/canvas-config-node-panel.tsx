@@ -17,13 +17,14 @@ type CanvasConfigNodePanelProps = {
     node: CanvasNodeData;
     isRunning: boolean;
     inputSummary: { textCount: number; imageCount: number; videoCount: number; audioCount: number };
+    tableRowCount?: number;
     onConfigChange: (nodeId: string, patch: Partial<CanvasNodeMetadata>) => void;
     onGenerate: (nodeId: string) => void;
     onStop: (nodeId: string) => void;
     onComposerToggle: () => void;
 };
 
-export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigChange, onGenerate, onStop, onComposerToggle }: CanvasConfigNodePanelProps) {
+export function CanvasConfigNodePanel({ node, isRunning, inputSummary, tableRowCount = 0, onConfigChange, onGenerate, onStop, onComposerToggle }: CanvasConfigNodePanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
@@ -34,9 +35,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
-    // Batch generation produces images per table row; text/video/audio nodes keep their normal flow.
+    // Batch generation produces images per table row; a wired table turns it on automatically.
     const batchVisible = mode === "image";
-    const batchMode = Boolean(node.metadata?.batchMode);
+    const tableConnected = tableRowCount > 0;
+    const batchMode = Boolean(node.metadata?.batchMode) || tableConnected;
     const batchConcurrency = node.metadata?.batchConcurrency || 2;
     const batchProgress = node.metadata?.batchProgress;
 
@@ -95,6 +97,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             <div className="mb-2 flex flex-wrap gap-1.5">
                 <InputChip label={t("canvas.configNode.prompt")} value={t("canvas.configNode.items", { count: inputSummary.textCount })} style={chipStyle} />
                 <InputChip label={t("canvas.configNode.references")} value={t("canvas.configNode.images", { count: inputSummary.imageCount })} style={chipStyle} />
+                {tableConnected ? <InputChip label={t("canvas.configNode.table")} value={t("canvas.configNode.tableRows", { count: tableRowCount })} style={chipStyle} /> : null}
                 <InputChip label={t("canvas.configNode.videoReferences")} value={t("canvas.configNode.items", { count: inputSummary.videoCount })} style={chipStyle} />
                 <InputChip label={t("canvas.configNode.audioReferences")} value={t("canvas.configNode.items", { count: inputSummary.audioCount })} style={chipStyle} />
                 <button type="button" className="inline-flex h-7 cursor-pointer items-center gap-1 rounded-md border px-2 text-[11px]" style={chipStyle} onMouseDown={(event) => event.stopPropagation()} onClick={onComposerToggle}>
@@ -122,12 +125,14 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         <Table2 className="size-3.5" style={{ color: theme.node.muted }} />
                         {t("canvas.configNode.batch")}
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-[10px]" style={{ color: theme.node.muted }} title={t("canvas.configNode.batchTitle")}>
+                    <span className="min-w-0 flex-1 truncate text-[10px]" style={{ color: theme.node.muted }} title={tableConnected ? t("canvas.configNode.tableAutoBatch") : t("canvas.configNode.batchTitle")}>
                         {batchProgress
                             ? `${t("canvas.configNode.batchProgress", { done: batchProgress.done, total: batchProgress.total })} · ${
                                   batchProgress.running ? t("canvas.configNode.batchRunning") : batchProgress.failed > 0 ? t("canvas.configNode.batchPartial", { failed: batchProgress.failed }) : t("canvas.configNode.batchDone")
                               }`
-                            : t("canvas.configNode.batchTitle")}
+                            : tableConnected
+                              ? t("canvas.configNode.tableAutoBatch")
+                              : t("canvas.configNode.batchTitle")}
                     </span>
                     <span className="flex shrink-0 items-center gap-1 text-[10px]" style={{ color: theme.node.muted }}>
                         {t("canvas.configNode.batchConcurrency")}
@@ -141,7 +146,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                             onMouseDown={(event) => event.stopPropagation()}
                             onChange={(value) => onConfigChange(node.id, { batchConcurrency: Math.min(4, Math.max(1, Number(value) || 2)) })}
                         />
-                        <Switch size="small" checked={batchMode} onChange={(value) => onConfigChange(node.id, { batchMode: value })} />
+                        <Switch size="small" checked={batchMode} disabled={tableConnected} onChange={(value) => onConfigChange(node.id, { batchMode: value })} />
                     </span>
                 </div>
             ) : null}

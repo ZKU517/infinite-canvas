@@ -49,6 +49,7 @@ import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { findConfigTable, syncAllTableInputs, tableBatchRows, tableRowCountForConfig } from "@/lib/canvas/canvas-table";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, nodeBounds, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
@@ -159,7 +160,7 @@ async function imageContentToDataUrl(content: string) {
 
 const TABLE_ROW_HEIGHT = 44;
 
-type TableBatchRow = { rowId: string; rowIndex: number; prompt: string; reference?: ReferenceImage };
+type TableBatchRow = { rowId: string; rowIndex: number; prompt: string; reference?: ReferenceImage; sourceNodeId?: string };
 
 // Table nodes grow with their row count while staying inside a readable range.
 function tableNodeHeight(rowCount: number) {
@@ -494,7 +495,9 @@ function InfiniteCanvasPage() {
         }
 
         const restore = async () => {
-            const restoredNodes = await hydrateTableRowImages(await hydrateCanvasImages(resetInterruptedGeneration(project.nodes)));
+            const hydratedNodes = await hydrateTableRowImages(await hydrateCanvasImages(resetInterruptedGeneration(project.nodes)));
+            // Connection-driven table inputs: wired images/text become input rows on every load.
+            const restoredNodes = syncAllTableInputs(hydratedNodes, project.connections).nodes;
             const restoredSessions = await hydrateAssistantImages(project.chatSessions || []);
             setNodes(restoredNodes);
             setConnections(project.connections);
@@ -603,6 +606,13 @@ function InfiniteCanvasPage() {
         selectionBoxRef.current = selectionBox;
     }, [selectionBox]);
 
+    // Keep table input rows in sync with connections (add on wire, drop when a wire is removed).
+    useEffect(() => {
+        if (!projectLoaded) return;
+        const result = syncAllTableInputs(nodesRef.current, connections);
+        if (result.changed) setNodes(result.nodes);
+    }, [connections, projectLoaded]);
+
     useEffect(() => {
         if (!projectLoaded) return;
         const el = containerRef.current;
@@ -668,6 +678,12 @@ function InfiniteCanvasPage() {
             const exists = connectionsRef.current.some((conn) => conn.fromNodeId === fromNodeId && conn.toNodeId === toNodeId);
             if (!exists) {
                 setConnections((prev) => [...prev, { id: `conn-${Date.now()}`, fromNodeId, toNodeId }]);
+                const fromNode = nodesRef.current.find((node) => node.id === fromNodeId);
+                const toNode = nodesRef.current.find((node) => node.id === toNodeId);
+                // Wiring a table into a generation config turns batch row-by-row generation on automatically.
+                if (fromNode?.type === CanvasNodeType.Table && toNode?.type === CanvasNodeType.Config) {
+                    setNodes((prev) => prev.map((node) => (node.id === toNodeId ? { ...node, metadata: { ...node.metadata, batchMode: true } } : node)));
+                }
             }
             setContextMenu(null);
         },
@@ -3327,14 +3343,15 @@ function InfiniteCanvasPage() {
             const nodes = nodesRef.current;
             const connections = connectionsRef.current;
             const upstream = connections
-                .filter((connection) => connection.toNodeId === configNode.id)
-                .map((connection) => nodes.find((node) => node.id === connection.fromNodeId))
-                .filter((node): node is CanvasNodeData => Boolean(node));
-            // Row sources: the connected table first, then multi-line text or directly connected image nodes.
-            const tableNode = upstream.find((node) => node.type === CanvasNodeType.Table);
+                .filter((connection) => connection.toNodeId === configNode.id || connection.fromNodeId === configNode.id)
+                .map((connection) => nodes.find((node) => node.id === (connection.toNodeId === configNode.id ? connection.fromNodeId : connection.toNodeId)))
+                .filter((node): node is CanvasNodeData => Boolean(node && node.id !== configNode.id));
+            // Row sources: the connected table first (including rows synced from its connection inputs),
+            // then multi-line text or directly connected image nodes.
+            const tableNode = findConfigTable(configNode.id, nodes, connections);
+            const tableRows = tableBatchRows(tableNode, nodes, connections);
             const rows: TableBatchRow[] = [];
-            for (const [index, row] of (tableNode?.metadata?.rows || []).entries()) {
-                if (!row.prompt.trim()) continue;
+            for (const [index, row] of tableRows.entries()) {
                 let reference: ReferenceImage | undefined;
                 if (row.imageUrl || row.imageStorageKey) {
                     try {
@@ -3344,7 +3361,7 @@ function InfiniteCanvasPage() {
                         reference = undefined;
                     }
                 }
-                rows.push({ rowId: row.id, rowIndex: index, prompt: row.prompt.trim(), reference });
+                rows.push({ rowId: row.id, rowIndex: index, prompt: row.prompt.trim(), reference, sourceNodeId: row.sourceNodeId });
             }
             if (!rows.length) {
                 const textLines = upstream
@@ -3393,7 +3410,7 @@ function InfiniteCanvasPage() {
                 return {
                     id: nanoid(),
                     type: CanvasNodeType.Image,
-                    title: row.prompt.slice(0, 32) || tableNode?.title || t("canvas.nodeTypes.image"),
+                    title: row.prompt.slice(0, 32) || t("canvas.configNode.batchRow", { index: index + 1 }),
                     position: cellAt(index),
                     width: imageConfig.width,
                     height: imageConfig.height,
@@ -3427,16 +3444,24 @@ function InfiniteCanvasPage() {
                     if (!item) break;
                     const cell = cellAt(item.batchIndex);
                     try {
-                        const image = item.reference
-                            ? await requestEdit(generationConfig, item.prompt, [item.reference], { signal: controller.signal }).then((items) => items[0])
-                            : await requestGeneration(generationConfig, item.prompt, { signal: controller.signal }).then((items) => items[0]);
+                        // Each row keeps its own prompt/reference while still receiving the wired prompt text and global references.
+                        const basePrompt = item.prompt || configNode.metadata?.composerContent || configNode.metadata?.prompt || "";
+                        const context = await hydrateNodeGenerationContext(buildNodeGenerationContext(configNode.id, nodesRef.current, connectionsRef.current, basePrompt));
+                        const promptText = context.prompt.trim() || item.prompt;
+                        const references = item.reference
+                            ? [item.reference, ...context.referenceImages.filter((reference) => reference.id !== item.reference?.id)]
+                            : context.referenceImages;
+                        const generationType = references.length ? ("edit" as const) : ("generation" as const);
+                        const image = references.length
+                            ? await requestEdit(generationConfig, promptText, references, { signal: controller.signal }).then((items) => items[0])
+                            : await requestGeneration(generationConfig, promptText, { signal: controller.signal }).then((items) => items[0]);
                         const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
                         const size = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                         const next: CanvasNodeData = {
                             ...item.node,
                             position: { x: cell.x + (imageConfig.width - size.width) / 2, y: cell.y + (imageConfig.height - size.height) / 2 },
                             ...size,
-                            metadata: { ...item.node.metadata, ...imageMetadata(uploaded), status: NODE_STATUS_SUCCESS, errorDetails: undefined },
+                            metadata: { ...item.node.metadata, ...imageMetadata(uploaded), prompt: promptText || item.prompt, ...buildImageGenerationMetadata(generationType, generationConfig, 1, references), status: NODE_STATUS_SUCCESS, errorDetails: undefined },
                         };
                         resultById.set(item.node.id, next);
                         setNodes((prev) => prev.map((node) => (node.id === item.node.id ? next : node)));
@@ -3520,27 +3545,39 @@ function InfiniteCanvasPage() {
         [configInputsById, confirmStopGeneration, connectedNodesByNodeId, disconnectNodeReference, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, mentionReferencesByNodeId, nodes, renderPluginPanel, runningNodeId, startNodeReferenceSelection],
     );
 
+    // Batch row counts per generation config, used by the config card and its run button.
+    const tableRowCountByConfigId = useMemo(() => {
+        const map = new Map<string, number>();
+        nodes.forEach((node) => {
+            if (node.type !== CanvasNodeType.Config) return;
+            const count = tableRowCountForConfig(node.id, nodes, connections);
+            if (count) map.set(node.id, count);
+        });
+        return map;
+    }, [connections, nodes]);
+
     const renderNodeContentPanel = useCallback(
         (contentNode: CanvasNodeData) => (
             <CanvasConfigNodePanel
                 node={contentNode}
                 isRunning={runningNodeId === contentNode.id}
                 inputSummary={getInputSummary(configInputsById.get(contentNode.id) || [])}
+                tableRowCount={tableRowCountByConfigId.get(contentNode.id) || 0}
                 onConfigChange={handleConfigNodeChange}
                 onComposerToggle={() => setDialogNodeId((current) => (current === contentNode.id ? null : contentNode.id))}
                 onStop={confirmStopGeneration}
                 onGenerate={(nodeId) => {
                     const target = nodesRef.current.find((item) => item.id === nodeId);
                     const mode = target?.metadata?.generationMode || "image";
-                    if (target?.metadata?.batchMode && mode === "image") {
-                        void generateBatchFromTable(target);
+                    if (mode === "image" && (target?.metadata?.batchMode || tableRowCountForConfig(nodeId, nodesRef.current, connectionsRef.current) > 0)) {
+                        void generateBatchFromTable(target!);
                         return;
                     }
                     void handleGenerateNode(nodeId, mode, target?.metadata?.composerContent ?? target?.metadata?.prompt ?? "");
                 }}
             />
         ),
-        [configInputsById, confirmStopGeneration, generateBatchFromTable, handleConfigNodeChange, handleGenerateNode, runningNodeId],
+        [configInputsById, confirmStopGeneration, generateBatchFromTable, handleConfigNodeChange, handleGenerateNode, runningNodeId, tableRowCountByConfigId],
     );
 
     const hoverPreviewNode = hoverPreviewNodeId ? nodeById.get(hoverPreviewNodeId) || null : null;

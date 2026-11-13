@@ -1,5 +1,5 @@
 import type { MouseEvent as ReactMouseEvent } from "react";
-import { ImagePlus, Plus, Rows3, Trash2, X } from "lucide-react";
+import { FileText, Image as ImageIcon, ImagePlus, Plus, Rows3, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { nanoid } from "nanoid";
 
@@ -21,6 +21,7 @@ const stop = (event: ReactMouseEvent) => event.stopPropagation();
 export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickReference, onClearReference, onImportLines, onFromImages }: CanvasTableNodeContentProps) {
     const { t } = useTranslation();
     const rows = node.metadata?.rows || [];
+    const inputCount = rows.filter((row) => row.sourceNodeId).length;
     const commit = (next: CanvasTableRow[]) => onRowsChange(node.id, next);
     const updateRow = (rowId: string, patch: Partial<CanvasTableRow>) => commit(rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
     const flatButtonClass = "inline-flex h-7 min-w-0 items-center gap-1 rounded-md px-1.5 text-[11px] transition";
@@ -44,6 +45,7 @@ export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickRefere
                     </button>
                 </div>
                 <span className="shrink-0" style={{ color: theme.node.muted, fontSize: 11 }}>
+                    {inputCount ? t("canvas.table.connectedInputs", { count: inputCount }) + " · " : ""}
                     {t("canvas.table.rows", { count: rows.length })}
                 </span>
             </div>
@@ -59,6 +61,15 @@ export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickRefere
                     <div className="space-y-1.5">
                         {rows.map((row) => (
                             <div key={row.id} className="flex items-center gap-2">
+                                {row.sourceNodeId ? (
+                                    <span
+                                        className="grid size-5 shrink-0 place-items-center rounded-md border"
+                                        style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
+                                        title={t(row.sourceKind === "text" ? "canvas.table.textInput" : "canvas.table.inputRow")}
+                                    >
+                                        {row.sourceKind === "text" ? <FileText className="size-3" /> : <ImageIcon className="size-3" />}
+                                    </span>
+                                ) : null}
                                 <input
                                     value={row.prompt}
                                     placeholder={t("canvas.table.rowPlaceholder")}

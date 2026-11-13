@@ -34,11 +34,16 @@ export type CanvasNodeSplitGrid = {
     column: number;
 };
 
+export type CanvasTableRowSourceKind = "image" | "text";
+
 export type CanvasTableRow = {
     id: string;
     prompt: string;
     imageStorageKey?: string;
     imageUrl?: string;
+    /** Set when this row came from a node wired into the table (connection-driven input column). */
+    sourceNodeId?: string;
+    sourceKind?: CanvasTableRowSourceKind;
 };
 
 export type CanvasTableColumn = "prompt" | "reference";

@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
-import { ArrowUp, ChevronDown, ChevronUp, LoaderCircle, Maximize2, SlidersHorizontal, Square } from "lucide-react";
+import { ArrowUp, LoaderCircle, Maximize2, Minus, Plus, Square } from "lucide-react";
 import { Button, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { ModelPicker } from "@/components/model-picker";
-import { ImageSettingsPanel } from "@/components/image-settings-panel";
 import { defaultConfig, resolveModelForCapability, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { canvasThemes } from "@/lib/canvas-theme";
+import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
+import { inferMediaRatio, inferMediaScale } from "@/lib/media-size";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasGroupedModelPicker } from "./canvas-grouped-model-picker";
+import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasPromptLibrary } from "./canvas-prompt-library";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasPromptChipInput } from "./canvas-prompt-chip-input";
@@ -36,32 +37,42 @@ type CanvasNodePromptPanelProps = {
     modeOverride?: CanvasNodeGenerationMode; // Plugin nodes set their generation type through useBuiltinPanel.mode.
 };
 
-export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], connectedNodes = [], onDisconnectReference, onStartReferenceSelection, onImageSettingsOpenChange, modeOverride }: CanvasNodePromptPanelProps) {
+export function CanvasNodePromptPanel({
+    node,
+    nodes,
+    isRunning,
+    onPromptChange,
+    onConfigChange,
+    onGenerate,
+    onStop,
+    mentionReferences = [],
+    connectedNodes = [],
+    onDisconnectReference,
+    onStartReferenceSelection,
+    onImageSettingsOpenChange,
+    modeOverride,
+}: CanvasNodePromptPanelProps) {
     const { t } = useTranslation();
     const globalConfig = useEffectiveConfig();
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = modeOverride ?? defaultMode(node.type);
     const config = buildNodeConfig(globalConfig, node, mode);
+    const imageRatio = inferMediaRatio(config.size || "auto");
+    const imageScale = inferMediaScale(config.size || "auto");
+    const imageParamsLabel = imageRatio === "auto" ? t("settingsPanels.common.auto") : `${imageRatio} · ${imageScale === "auto" ? t("settingsPanels.common.auto") : imageScale.toUpperCase()}`;
+    const imageCount = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
     const isEditingExistingContent = hasTextContent || hasImageContent;
     const [prompt, setPrompt] = useState(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
     const [expanded, setExpanded] = useState(false);
-    const [imageSettingsExpanded, setImageSettingsExpanded] = useState(true);
 
     // Restore prompts only when switching nodes; preserve the current input after generation on the same node.
     useEffect(() => {
         setPrompt(node.metadata?.composerContent ?? node.metadata?.prompt ?? "");
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [node.id]);
-
-    // Parameters are inline now, so the old popover "open" flag used to suppress the hover toolbar must stay false.
-    useEffect(() => {
-        onImageSettingsOpenChange?.(false);
-        return () => onImageSettingsOpenChange?.(false);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
 
     const updatePrompt = (value: string) => {
         setPrompt(value);
@@ -99,15 +110,20 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                 placeholder={t(`canvas.promptPanel.${mode === "image" && hasImageContent ? "editImage" : mode === "text" && hasTextContent ? "editText" : mode}`)}
             />
 
-            <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
+            <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
                 <div className="flex min-w-0 items-center gap-2">
                     <Tooltip title={t("canvas.promptPanel.expandEditor")}>
-                        <Button type="text" className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0" style={{ color: theme.node.text }} icon={<Maximize2 className="size-3.5" />} onClick={openExpandedEditor} aria-label={t("canvas.promptPanel.expandEditor")} />
+                        <Button
+                            type="text"
+                            className="!h-8 !w-8 !min-w-8 shrink-0 !rounded-full !bg-transparent !p-0"
+                            style={{ color: theme.node.text }}
+                            icon={<Maximize2 className="size-3.5" />}
+                            onClick={openExpandedEditor}
+                            aria-label={t("canvas.promptPanel.expandEditor")}
+                        />
                     </Tooltip>
                     <CanvasPromptLibrary onSelect={updatePrompt} />
-                    {mode === "image" ? (
-                        <CanvasGroupedModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="min-w-0 max-w-full" />
-                    ) : mode === "video" ? (
+                    {mode === "video" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="video" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasVideoSettingsPopover config={config} buttonClassName="!h-10 !max-w-[220px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
@@ -117,59 +133,66 @@ export function CanvasNodePromptPanel({ node, nodes, isRunning, onPromptChange, 
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="audio" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
                             <CanvasAudioSettingsPopover config={config} buttonClassName="!h-10 !max-w-[170px] !justify-start !rounded-full !px-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                         </>
-                    ) : (
+                    ) : mode === "text" ? (
                         <>
                             <ModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="text" onMissingConfig={() => openConfigDialog(true)} className="max-w-[190px]" />
-                            <CanvasTextSettingsPopover config={config} count={node.metadata?.textCount || 1} onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })} onCountChange={(textCount) => onConfigChange(node.id, { textCount })} />
-                        </>
-                    )}
-                </div>
-                <Button
-                    type="primary"
-                    className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
-                    danger={isRunning}
-                    disabled={!isRunning && !prompt.trim()}
-                    onClick={() => (isRunning ? onStop(node.id) : submit())}
-                    aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
-                >
-                    <span className="flex items-center gap-1.5">
-                        {isRunning ? (
-                            <>
-                                <LoaderCircle className="size-4 animate-spin" />
-                                <Square className="size-3.5 fill-current" />
-                                <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
-                            </>
-                        ) : (
-                            <ArrowUp className="size-4" />
-                        )}
-                    </span>
-                </Button>
-            </div>
-            {mode === "image" ? (
-                <div className="mt-2 border-t pt-2" style={{ borderColor: theme.toolbar.border }}>
-                    <button type="button" className="flex w-full items-center justify-between gap-2 rounded-lg px-1 py-0.5 text-left" style={{ color: theme.node.muted }} onClick={() => setImageSettingsExpanded((current) => !current)} aria-expanded={imageSettingsExpanded}>
-                        <span className="inline-flex items-center gap-1.5 text-xs font-medium">
-                            <SlidersHorizontal className="size-3.5" />
-                            {t("canvas.promptPanel.imageSettings")}
-                        </span>
-                        {imageSettingsExpanded ? <ChevronUp className="size-3.5 opacity-70" /> : <ChevronDown className="size-3.5 opacity-70" />}
-                    </button>
-                    {imageSettingsExpanded ? (
-                        <div className="mt-1.5">
-                            <ImageSettingsPanel
+                            <CanvasTextSettingsPopover
                                 config={config}
-                                showTitle={false}
-                                theme={theme}
-                                className="grid grid-cols-1 gap-x-5 gap-y-3.5 sm:grid-cols-2 [&>div]:min-w-0"
-                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                                count={node.metadata?.textCount || 1}
+                                onConfigChange={(_, value) => onConfigChange(node.id, { reasoningEffort: value })}
+                                onCountChange={(textCount) => onConfigChange(node.id, { textCount })}
                             />
-                        </div>
+                        </>
                     ) : null}
                 </div>
-            ) : null}
+                <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+                    {mode === "image" ? (
+                        <>
+                            <CanvasGroupedModelPicker config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability="image" onMissingConfig={() => openConfigDialog(true)} className="min-w-0 max-w-full" />
+                            <CanvasImageSettingsPopover
+                                config={config}
+                                label={imageParamsLabel}
+                                showCount={false}
+                                onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
+                                onOpenChange={onImageSettingsOpenChange}
+                            />
+                            <CountStepper count={imageCount} theme={theme} onChange={(count) => onConfigChange(node.id, { count })} />
+                        </>
+                    ) : null}
+                    <Button
+                        type="primary"
+                        className="!h-10 !min-w-16 shrink-0 !rounded-full !px-3"
+                        danger={isRunning}
+                        disabled={!isRunning && !prompt.trim()}
+                        onClick={() => (isRunning ? onStop(node.id) : submit())}
+                        aria-label={t(isRunning ? "canvas.promptPanel.stopGeneration" : "canvas.promptPanel.generate")}
+                    >
+                        <span className="flex items-center gap-1.5">
+                            {isRunning ? (
+                                <>
+                                    <LoaderCircle className="size-4 animate-spin" />
+                                    <Square className="size-3.5 fill-current" />
+                                    <span className="text-xs font-medium">{t("canvas.promptPanel.stop")}</span>
+                                </>
+                            ) : (
+                                <ArrowUp className="size-4" />
+                            )}
+                        </span>
+                    </Button>
+                </div>
+            </div>
             <Modal title={t("canvas.promptPanel.editorTitle")} open={expanded} centered width={760} footer={null} onCancel={() => setExpanded(false)} destroyOnHidden>
                 <div data-canvas-no-zoom className="pt-2" onWheelCapture={(event) => event.stopPropagation()}>
-                    <CanvasNodeReferenceBar nodeId={node.id} nodes={nodes} connectedNodes={connectedNodes} onDisconnect={onDisconnectReference} onStartSelection={(nodeId) => { setExpanded(false); onStartReferenceSelection?.(nodeId); }} />
+                    <CanvasNodeReferenceBar
+                        nodeId={node.id}
+                        nodes={nodes}
+                        connectedNodes={connectedNodes}
+                        onDisconnect={onDisconnectReference}
+                        onStartSelection={(nodeId) => {
+                            setExpanded(false);
+                            onStartReferenceSelection?.(nodeId);
+                        }}
+                    />
                     <CanvasPromptChipInput
                         value={prompt}
                         references={mentionReferences}
@@ -222,4 +245,39 @@ function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
     if (key === "audioFormat") return { audioFormat: value };
     if (key === "audioSpeed") return { audioSpeed: value };
     return { audioInstructions: value };
+}
+
+function CountStepper({ count, theme, onChange }: { count: number; theme: CanvasTheme; onChange: (count: number) => void }) {
+    const { t } = useTranslation();
+    const setCount = (next: number) => onChange(Math.max(1, Math.min(15, next)));
+    return (
+        <span
+            className="inline-flex h-8 shrink-0 items-center gap-0.5 rounded-full border px-1"
+            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+            onMouseDown={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+        >
+            <Button
+                size="small"
+                type="text"
+                className="!h-6 !w-6 !min-w-6 !rounded-full !p-0 disabled:opacity-40"
+                style={{ color: theme.node.text }}
+                icon={<Minus className="size-3" />}
+                disabled={count <= 1}
+                onClick={() => setCount(count - 1)}
+                aria-label={t("canvas.promptPanel.decreaseCount")}
+            />
+            <span className="min-w-6 text-center text-xs font-medium tabular-nums">{t("canvas.promptPanel.countShort", { count })}</span>
+            <Button
+                size="small"
+                type="text"
+                className="!h-6 !w-6 !min-w-6 !rounded-full !p-0 disabled:opacity-40"
+                style={{ color: theme.node.text }}
+                icon={<Plus className="size-3" />}
+                disabled={count >= 15}
+                onClick={() => setCount(count + 1)}
+                aria-label={t("canvas.promptPanel.increaseCount")}
+            />
+        </span>
+    );
 }

@@ -14,13 +14,15 @@ type CanvasImageSettingsPopoverProps = {
     onConfigChange: (key: keyof AiConfig, value: string) => void;
     onMissingConfig?: () => void;
     onOpenChange?: (open: boolean) => void;
+    label?: string;
+    showCount?: boolean;
     buttonClassName?: string;
     getPopupContainer?: (triggerNode: HTMLElement) => HTMLElement;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
     autoAdjustOverflow?: boolean;
 };
 
-export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, buttonClassName, placement = "topLeft" }: CanvasImageSettingsPopoverProps) {
+export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChange, label, showCount = true, buttonClassName, placement = "topLeft" }: CanvasImageSettingsPopoverProps) {
     const { t } = useTranslation();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
@@ -58,15 +60,20 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
         };
     }, [onOpenChange, open]);
 
-    const panel = open && buttonRect ? <ImageSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    const panel = open && buttonRect ? <ImageSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} showCount={showCount} onConfigChange={onConfigChange} /> : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
-                <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => updateOpen(!open)}>
-                    <span className="truncate">
-                        {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
-                    </span>
+                <Button
+                    size="small"
+                    type="text"
+                    className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"}
+                    style={{ background: theme.node.fill, color: theme.node.text }}
+                    icon={<Settings2 className="size-3.5" />}
+                    onClick={() => updateOpen(!open)}
+                >
+                    <span className="truncate">{label ?? `${imageQualityLabel(quality)} · ${imageSizeLabel(activeSize)} · ${t("canvas.controls.images", { count })}`}</span>
                 </Button>
             </span>
             {panel}
@@ -80,6 +87,7 @@ function ImageSettingsPortal({
     placement,
     theme,
     config,
+    showCount,
     onConfigChange,
 }: {
     buttonRect: DOMRect;
@@ -87,6 +95,7 @@ function ImageSettingsPortal({
     placement: CanvasImageSettingsPopoverProps["placement"];
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     config: AiConfig;
+    showCount: boolean;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
 }) {
     const width = 356;
@@ -111,15 +120,8 @@ function ImageSettingsPortal({
     } as const;
 
     return createPortal(
-        <div
-            ref={panelRef}
-            className="canvas-image-settings-popover"
-            style={style}
-            onPointerDown={(event) => event.stopPropagation()}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
-        >
-            <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-4" />
+        <div ref={panelRef} className="canvas-image-settings-popover" style={style} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}>
+            <ImageSettingsPanel config={config} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} showCount={showCount} className="space-y-4" />
         </div>,
         document.body,
     );

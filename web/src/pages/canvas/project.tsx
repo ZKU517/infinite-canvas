@@ -88,6 +88,7 @@ import {
     type CanvasNodeText,
     type CanvasNodeMetadata,
     type CanvasTableRow,
+    type CanvasNodeSplitGrid,
     type CanvasNodeTypeId,
     type ConnectionHandle,
     type ContextMenuState,
@@ -160,7 +161,7 @@ async function imageContentToDataUrl(content: string) {
 
 const TABLE_ROW_HEIGHT = 44;
 
-type TableBatchRow = { rowId: string; rowIndex: number; prompt: string; reference?: ReferenceImage; sourceNodeId?: string };
+type TableBatchRow = { rowId: string; rowIndex: number; prompt: string; reference?: ReferenceImage; sourceNodeId?: string; splitGrid?: CanvasNodeSplitGrid };
 
 // Table nodes grow with their row count while staying inside a readable range.
 function tableNodeHeight(rowCount: number) {
@@ -3513,6 +3514,16 @@ function InfiniteCanvasPage() {
             // then multi-line text or directly connected image nodes.
             const tableNode = findConfigTable(configNode.id, nodes, connections);
             const tableRows = tableBatchRows(tableNode, nodes, connections);
+            // Generated results keep the grid lineage of the slice they came from, so the batch can be stitched back.
+            const findRowSplitGrid = (row: { sourceNodeId?: string; imageStorageKey?: string }) => {
+                const direct = row.sourceNodeId ? nodes.find((node) => node.id === row.sourceNodeId) : undefined;
+                if (direct?.metadata?.splitGrid) return direct.metadata.splitGrid;
+                if (row.imageStorageKey) {
+                    const matched = nodes.find((node) => node.type === CanvasNodeType.Image && node.metadata?.storageKey === row.imageStorageKey && Boolean(node.metadata?.splitGrid));
+                    if (matched?.metadata?.splitGrid) return matched.metadata.splitGrid;
+                }
+                return undefined;
+            };
             const rows: TableBatchRow[] = [];
             for (const [index, row] of tableRows.entries()) {
                 let reference: ReferenceImage | undefined;
@@ -3524,7 +3535,7 @@ function InfiniteCanvasPage() {
                         reference = undefined;
                     }
                 }
-                rows.push({ rowId: row.id, rowIndex: index, prompt: row.prompt.trim(), reference, sourceNodeId: row.sourceNodeId });
+                rows.push({ rowId: row.id, rowIndex: index, prompt: row.prompt.trim(), reference, sourceNodeId: row.sourceNodeId, splitGrid: findRowSplitGrid(row) });
             }
             if (!rows.length) {
                 const textLines = upstream
@@ -3545,6 +3556,7 @@ function InfiniteCanvasPage() {
                                 rowIndex: index,
                                 prompt: (node.metadata?.prompt || node.title || "").trim(),
                                 reference: { id: node.id, name: `${node.title || node.id}.png`, type: node.metadata?.mimeType || "image/png", dataUrl: node.metadata?.content || "", storageKey: node.metadata?.storageKey },
+                                splitGrid: node.metadata?.splitGrid,
                             }),
                         );
                 }
@@ -3553,6 +3565,12 @@ function InfiniteCanvasPage() {
                 message.warning(t("canvas.configNode.batchEmpty"));
                 return;
             }
+
+            // Give this batch its own grid lineage: its results stitch together without colliding with the original slices.
+            const batchLineageId = "batch-" + nanoid(8);
+            rows.forEach((row) => {
+                if (row.splitGrid) row.splitGrid = { ...row.splitGrid, sourceNodeId: batchLineageId };
+            });
 
             const generationConfig = { ...buildGenerationConfig(effectiveConfig, configNode, "image"), count: "1" };
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
@@ -3581,6 +3599,7 @@ function InfiniteCanvasPage() {
                         prompt: row.prompt,
                         status: NODE_STATUS_LOADING,
                         ...buildImageGenerationMetadata(referenceImages.length ? "edit" : "generation", generationConfig, 1, referenceImages),
+                        ...(row.splitGrid ? { splitGrid: row.splitGrid } : {}),
                         tableRowIndex: row.rowIndex,
                         tableRowId: row.rowId,
                     },

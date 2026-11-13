@@ -22,6 +22,7 @@ export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickRefere
     const { t } = useTranslation();
     const rows = node.metadata?.rows || [];
     const inputCount = rows.filter((row) => row.sourceNodeId).length;
+    const promptCount = rows.filter((row) => row.promptSourceNodeId).length;
     const commit = (next: CanvasTableRow[]) => onRowsChange(node.id, next);
     const updateRow = (rowId: string, patch: Partial<CanvasTableRow>) => commit(rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
     const flatButtonClass = "inline-flex h-7 min-w-0 items-center gap-1 rounded-md px-1.5 text-[11px] transition";
@@ -44,9 +45,10 @@ export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickRefere
                         {t("canvas.table.fromImages")}
                     </button>
                 </div>
-                <span className="shrink-0" style={{ color: theme.node.muted, fontSize: 11 }}>
-                    {inputCount ? t("canvas.table.connectedInputs", { count: inputCount }) + " · " : ""}
-                    {t("canvas.table.rows", { count: rows.length })}
+                <span className="shrink-0" style={{ color: theme.node.muted, fontSize: 11 }} title={t("canvas.table.connectionHint")}>
+                    {inputCount || promptCount
+                        ? t("canvas.table.connectedSummary", { inputs: inputCount, prompts: promptCount, rows: rows.length })
+                        : t("canvas.table.rows", { count: rows.length })}
                 </span>
             </div>
 
@@ -62,12 +64,13 @@ export function CanvasTableNodeContent({ node, theme, onRowsChange, onPickRefere
                         {rows.map((row) => (
                             <div key={row.id} className="flex items-center gap-2">
                                 {row.sourceNodeId ? (
-                                    <span
-                                        className="grid size-5 shrink-0 place-items-center rounded-md border"
-                                        style={{ borderColor: theme.node.stroke, color: theme.node.muted }}
-                                        title={t(row.sourceKind === "text" ? "canvas.table.textInput" : "canvas.table.inputRow")}
-                                    >
-                                        {row.sourceKind === "text" ? <FileText className="size-3" /> : <ImageIcon className="size-3" />}
+                                    <span className="grid size-5 shrink-0 place-items-center rounded-md border" style={{ borderColor: theme.node.stroke, color: theme.node.muted }} title={t("canvas.table.inputRow")}>
+                                        <ImageIcon className="size-3" />
+                                    </span>
+                                ) : null}
+                                {row.promptSourceNodeId ? (
+                                    <span className="grid size-5 shrink-0 place-items-center rounded-md border" style={{ borderColor: theme.node.stroke, color: theme.node.muted }} title={t("canvas.table.promptFromConnection")}>
+                                        <FileText className="size-3" />
                                     </span>
                                 ) : null}
                                 <input

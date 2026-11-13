@@ -7,6 +7,8 @@ description: Implemented changes that still need manual verification
 
 The current release needs manual verification in these areas:
 
+- Text nodes wired into a table now fill the prompt column row by row instead of adding rows: connect a group of images plus one multi-line text node (or several single-line text nodes) into the table and verify each row shows the matching image and prompt, with the header reading "N inputs · M prompts · K rows". Extra text lines create prompt-only rows; missing lines leave the remaining image rows with an empty editable prompt. Running the batch should use each row's own prompt (image rows use image edit), while a text node wired to the generation config still acts as a global prompt for every row.
+
 - Batch results keep their grid lineage: run a table batch whose rows come from grid slices, then select (or hover) the generated result images and use Stitch — the dialog should infer the original rows × columns, preview the generated images, and produce one stitched image (no manual row/column input). Re-running the batch creates a separate lineage so old and new results are stitched separately.
 
 - Table output to an empty image node: wire the table output into an empty image node; the node panel should show "Table connected with N rows — one image per row", allow generation without typing a prompt, and produce one image per non-empty table row inside that node (edit for image rows, generation for text rows, prompt text wired into the image node appended). The table stays connected and re-running regenerates the same slots; legacy reversed "empty image node → table" edges should be repaired to "table → image node" on load and the connection hint should appear when dragging the table output onto unsupported targets.

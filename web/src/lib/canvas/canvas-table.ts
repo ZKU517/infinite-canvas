@@ -1,87 +1,126 @@
 import { getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasTableRow } from "@/types/canvas";
 
-export type CanvasTableInputEntry = {
+export type CanvasTableMediaEntry = {
     sourceNodeId: string;
-    sourceKind: "image" | "text";
     title: string;
-    prompt: string;
-    imageUrl?: string;
+    imageUrl: string;
     imageStorageKey?: string;
+};
+
+export type CanvasTablePromptEntry = {
+    sourceNodeId: string;
+    lineIndex: number;
+    prompt: string;
 };
 
 function resourcesOf(node: CanvasNodeData, nodes: CanvasNodeData[]) {
     return node.type === CanvasNodeType.Group ? getGroupResourceNodes(node.id, nodes) : [node];
 }
 
-/** Reads the nodes wired into a table and turns them into input-column entries (one per image/text). */
-export function collectTableInputEntries(tableId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasTableInputEntry[] {
+/** Incoming image nodes (or images inside an incoming group): one entry per row of the input column. */
+export function collectTableMediaEntries(tableId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasTableMediaEntry[] {
     const byId = new Map(nodes.map((node) => [node.id, node]));
     const seen = new Set<string>();
-    const entries: CanvasTableInputEntry[] = [];
+    const entries: CanvasTableMediaEntry[] = [];
     for (const connection of connections) {
         if (connection.toNodeId !== tableId) continue;
         const source = byId.get(connection.fromNodeId);
         if (!source) continue;
         for (const node of resourcesOf(source, nodes)) {
             if (seen.has(node.id)) continue;
-            if (node.type === CanvasNodeType.Image && node.metadata?.content) {
-                seen.add(node.id);
-                entries.push({ sourceNodeId: node.id, sourceKind: "image", title: node.title, prompt: "", imageUrl: node.metadata.content, imageStorageKey: node.metadata.storageKey });
-            } else if (node.type === CanvasNodeType.Text && (node.metadata?.content || node.metadata?.prompt)) {
-                seen.add(node.id);
-                entries.push({ sourceNodeId: node.id, sourceKind: "text", title: node.title, prompt: (node.metadata?.content || node.metadata?.prompt || "").trim() });
-            }
+            if (node.type !== CanvasNodeType.Image || !node.metadata?.content) continue;
+            seen.add(node.id);
+            entries.push({ sourceNodeId: node.id, title: node.title, imageUrl: node.metadata.content, imageStorageKey: node.metadata.storageKey });
+        }
+    }
+    return entries;
+}
+
+/** Incoming text nodes (or text inside an incoming group), split by line into per-row prompts. */
+export function collectTablePromptEntries(tableId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): CanvasTablePromptEntry[] {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const seen = new Set<string>();
+    const entries: CanvasTablePromptEntry[] = [];
+    for (const connection of connections) {
+        if (connection.toNodeId !== tableId) continue;
+        const source = byId.get(connection.fromNodeId);
+        if (!source) continue;
+        for (const node of resourcesOf(source, nodes)) {
+            if (seen.has(node.id)) continue;
+            if (node.type !== CanvasNodeType.Text) continue;
+            const content = (node.metadata?.content || node.metadata?.prompt || "").trim();
+            if (!content) continue;
+            seen.add(node.id);
+            content
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .forEach((prompt, lineIndex) => entries.push({ sourceNodeId: node.id, lineIndex, prompt }));
         }
     }
     return entries;
 }
 
 function sameRow(left: CanvasTableRow, right: CanvasTableRow) {
-    return left.id === right.id && left.prompt === right.prompt && left.imageUrl === right.imageUrl && left.imageStorageKey === right.imageStorageKey && left.sourceNodeId === right.sourceNodeId && left.sourceKind === right.sourceKind;
+    return (
+        left.id === right.id &&
+        left.prompt === right.prompt &&
+        left.imageUrl === right.imageUrl &&
+        left.imageStorageKey === right.imageStorageKey &&
+        left.sourceNodeId === right.sourceNodeId &&
+        left.sourceKind === right.sourceKind &&
+        left.promptSourceNodeId === right.promptSourceNodeId &&
+        left.promptLineIndex === right.promptLineIndex
+    );
 }
 
 function sameRows(left: CanvasTableRow[], right: CanvasTableRow[]) {
     return left.length === right.length && left.every((row, index) => sameRow(row, right[index]));
 }
 
-function findMatchingManualRow(manualRows: CanvasTableRow[], entry: CanvasTableInputEntry) {
-    return manualRows.findIndex((row) => {
-        if (entry.sourceKind === "image") return Boolean(entry.imageStorageKey && row.imageStorageKey === entry.imageStorageKey) || Boolean(entry.imageUrl && row.imageUrl === entry.imageUrl);
-        return Boolean(entry.prompt && row.prompt === entry.prompt);
-    });
+function findMatchingManualImageRow(manualRows: CanvasTableRow[], entry: CanvasTableMediaEntry) {
+    return manualRows.findIndex((row) => Boolean(entry.imageStorageKey && row.imageStorageKey === entry.imageStorageKey) || Boolean(entry.imageUrl && row.imageUrl === entry.imageUrl));
 }
 
 /**
- * Connection-driven table inputs: every wired image/text becomes an input row, manual rows stay after them.
- * Existing rows keep their ids and cell prompts, so persisted canvases migrate in place.
+ * Connection-driven table columns:
+ * - wired images fill the input column, one row each;
+ * - wired text lines fill the prompt column, zipped to the same row index;
+ * - manual rows stay after them.
+ * Existing rows keep their ids and manual prompts, so persisted canvases migrate in place.
  */
 export function syncTableInputRows(tableNode: CanvasNodeData, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     if (tableNode.type !== CanvasNodeType.Table) return { changed: false, node: tableNode };
-    const entries = collectTableInputEntries(tableNode.id, nodes, connections);
+    const mediaEntries = collectTableMediaEntries(tableNode.id, nodes, connections);
+    const promptEntries = collectTablePromptEntries(tableNode.id, nodes, connections);
     const previousRows = tableNode.metadata?.rows || [];
-    const previousBySource = new Map(previousRows.filter((row) => row.sourceNodeId).map((row) => [row.sourceNodeId as string, row]));
-    const manualRows = previousRows.filter((row) => !row.sourceNodeId);
-    const inputRows: CanvasTableRow[] = entries.map((entry) => {
-        const existing = previousBySource.get(entry.sourceNodeId);
+    const manualRows = previousRows.filter((row) => !row.sourceNodeId && !row.promptSourceNodeId);
+    const inputRows: CanvasTableRow[] = [];
+    const rowCount = Math.max(mediaEntries.length, promptEntries.length);
+    for (let index = 0; index < rowCount; index += 1) {
+        const media = mediaEntries[index];
+        const text = promptEntries[index];
+        const existing =
+            (media ? previousRows.find((row) => row.sourceNodeId === media.sourceNodeId) : undefined) ||
+            (text ? previousRows.find((row) => row.promptSourceNodeId === text.sourceNodeId && (row.promptLineIndex ?? 0) === text.lineIndex) : undefined);
         let base = existing;
-        if (!base) {
-            const matchIndex = findMatchingManualRow(manualRows, entry);
+        if (!base && media) {
+            const matchIndex = findMatchingManualImageRow(manualRows, media);
             if (matchIndex >= 0) base = manualRows.splice(matchIndex, 1)[0];
         }
-        return {
-            id: base?.id || "input-" + entry.sourceNodeId,
-            prompt: entry.sourceKind === "text" ? entry.prompt : base?.prompt || "",
-            imageUrl: entry.imageUrl ?? base?.imageUrl,
-            imageStorageKey: entry.imageStorageKey ?? base?.imageStorageKey,
-            sourceNodeId: entry.sourceNodeId,
-            sourceKind: entry.sourceKind,
-        };
-    });
-    const rows = [...inputRows, ...manualRows].map((row) => ({
-        ...row,
-        ...(row.sourceNodeId && !row.sourceKind ? { sourceKind: previousRows.find((item) => item.sourceNodeId === row.sourceNodeId)?.sourceKind || "image" } : {}),
-    }));
+        inputRows.push({
+            id: base?.id || "input-" + (media ? media.sourceNodeId : (text?.sourceNodeId || "text") + "-line-" + (text?.lineIndex ?? 0)),
+            prompt: text ? text.prompt : base?.prompt || "",
+            imageUrl: media?.imageUrl ?? base?.imageUrl,
+            imageStorageKey: media?.imageStorageKey ?? base?.imageStorageKey,
+            sourceNodeId: media?.sourceNodeId,
+            sourceKind: media ? "image" : text ? "text" : undefined,
+            promptSourceNodeId: text?.sourceNodeId,
+            promptLineIndex: text?.lineIndex,
+        });
+    }
+    const rows = [...inputRows, ...manualRows];
     if (sameRows(rows, previousRows)) return { changed: false, node: tableNode };
     return { changed: true, node: { ...tableNode, metadata: { ...tableNode.metadata, rows } } };
 }

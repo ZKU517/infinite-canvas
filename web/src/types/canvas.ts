@@ -44,6 +44,9 @@ export type CanvasTableRow = {
     /** Set when this row came from a node wired into the table (connection-driven input column). */
     sourceNodeId?: string;
     sourceKind?: CanvasTableRowSourceKind;
+    /** Set when this row's prompt came from a wired text node (connection-driven prompt column). */
+    promptSourceNodeId?: string;
+    promptLineIndex?: number;
 };
 
 export type CanvasTableColumn = "prompt" | "reference";

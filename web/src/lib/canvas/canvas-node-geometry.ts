@@ -31,20 +31,17 @@ export function findGroupDropTarget(movedIds: Set<string>, nodes: CanvasNodeData
     return null;
 }
 
+/**
+ * Attaches dragged nodes to a group. Positions are intentionally kept as dropped: the caller re-fits
+ * the group afterwards, so a node dropped near/over the edge expands the group instead of being
+ * pushed back inside the old bounds.
+ */
 export function snapNodesIntoGroup(movedIds: Set<string>, nodes: CanvasNodeData[], group: CanvasNodeData) {
     const movingNodes = nodes.filter((node) => movedIds.has(node.id) && node.type !== CanvasNodeType.Group);
     if (!movingNodes.length) return nodes;
-    const pad = 24;
-    const bounds = nodeBounds(movingNodes);
-    const left = group.position.x + pad;
-    const top = group.position.y + pad;
-    const right = group.position.x + group.width - pad;
-    const bottom = group.position.y + group.height - pad;
-    const dx = bounds.right - bounds.left > right - left ? left - bounds.left : bounds.left < left ? left - bounds.left : bounds.right > right ? right - bounds.right : 0;
-    const dy = bounds.bottom - bounds.top > bottom - top ? top - bounds.top : bounds.top < top ? top - bounds.top : bounds.bottom > bottom ? bottom - bounds.bottom : 0;
     return nodes.map((node) => {
         if (!movedIds.has(node.id) || node.type === CanvasNodeType.Group) return node;
-        return { ...node, position: { x: node.position.x + dx, y: node.position.y + dy }, metadata: { ...node.metadata, groupId: group.id } };
+        return { ...node, metadata: { ...node.metadata, groupId: group.id } };
     });
 }
 
